@@ -19,6 +19,17 @@ function App() {
   const [verifyProgress, setVerifyProgress] = useState({}); // { path: 0–100 }
   const [verifyResult, setVerifyResult] = useState({}); // { path: "kết quả" }
   
+  // === CROSS-TAB RECORDING (Tab B -> Tab A) ===
+  const recChannelRef = useRef(null);
+  const [isListening, setIsListening] = useState(false);
+  const [recStatus, setRecStatus] = useState('');
+  const [recChunks, setRecChunks] = useState([]); // Array<Blob|ArrayBuffer>
+  const [recMime, setRecMime] = useState('video/webm');
+  const [receivedBlobUrl, setReceivedBlobUrl] = useState(null);
+  const [processing, setProcessing] = useState(false);
+  const [tabBUrl, setTabBUrl] = useState('');
+  const [cropRect, setCropRect] = useState({ x: 0, y: 0, width: 640, height: 360 });
+  
   // === GỬI YÊU CẦU TÌM KIẾM ===
   const search = async () => {
     if (!file && !path) return alert('Vui lòng chọn video hoặc nhập đường dẫn!');
@@ -152,6 +163,210 @@ function App() {
     }
   };
 
+  // === LISTEN/RECEIVE RECORDED CHUNKS FROM TAB B ===
+  const handleIncomingMessage = (evt) => {
+    const data = evt?.data;
+    if (!data || typeof data !== 'object') return;
+    if (!('type' in data)) return;
+    try {
+      if (data.type === 'record:init') {
+        if (receivedBlobUrl) {
+          URL.revokeObjectURL(receivedBlobUrl);
+          setReceivedBlobUrl(null);
+        }
+        setRecChunks([]);
+        if (typeof data.mimeType === 'string') setRecMime(data.mimeType);
+        setRecStatus('Đang nhận dữ liệu ghi từ Tab B...');
+      } else if (data.type === 'record:chunk') {
+        const payload = data.payload;
+        if (!payload) return;
+        // payload có thể là ArrayBuffer hoặc Blob
+        if (payload instanceof ArrayBuffer) {
+          setRecChunks(prev => [...prev, payload]);
+        } else if (payload && typeof payload === 'object') {
+          setRecChunks(prev => [...prev, payload]);
+        }
+      } else if (data.type === 'record:done') {
+        setRecStatus('Đã nhận xong. Đang hợp nhất...');
+        assembleRecording();
+      } else if (data.type === 'record:error') {
+        setRecStatus('Lỗi từ Tab B: ' + (data.error || 'unknown'));
+      }
+    } catch (_) {}
+  };
+
+  const startListening = () => {
+    if (isListening) return;
+    setIsListening(true);
+    setRecStatus('Sẵn sàng nhận dữ liệu...');
+    // BroadcastChannel nếu cùng origin; nếu không, vẫn dùng window.postMessage
+    try {
+      if ('BroadcastChannel' in window) {
+        recChannelRef.current = new BroadcastChannel('video-record');
+        recChannelRef.current.onmessage = (e) => handleIncomingMessage(e);
+      }
+    } catch (_) {}
+    window.addEventListener('message', handleIncomingMessage);
+  };
+
+  const stopListening = () => {
+    if (!isListening) return;
+    setIsListening(false);
+    try {
+      if (recChannelRef.current) {
+        recChannelRef.current.close();
+        recChannelRef.current = null;
+      }
+    } catch (_) {}
+    window.removeEventListener('message', handleIncomingMessage);
+    setRecStatus('Đã dừng lắng nghe.');
+  };
+
+  useEffect(() => {
+    return () => {
+      // cleanup
+      stopListening();
+      if (receivedBlobUrl) URL.revokeObjectURL(receivedBlobUrl);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const assembleRecording = () => {
+    try {
+      if (!recChunks.length) {
+        setRecStatus('Không có dữ liệu để hợp nhất');
+        return;
+      }
+      const blob = new Blob(recChunks, { type: recMime || 'video/webm' });
+      const url = URL.createObjectURL(blob);
+      setReceivedBlobUrl(url);
+      setRecStatus('Đã hợp nhất video. Bạn có thể crop và lưu/tải lên.');
+    } catch (e) {
+      setRecStatus('Lỗi hợp nhất: ' + e.message);
+    }
+  };
+
+  // === CROP VIDEO BẰNG CANVAS (Client-side) ===
+  const cropVideoBlob = async (srcBlob, crop) => {
+    return await new Promise((resolve, reject) => {
+      try {
+        const video = document.createElement('video');
+        video.src = URL.createObjectURL(srcBlob);
+        video.muted = true;
+        video.playsInline = true;
+
+        const canvas = document.createElement('canvas');
+        const outW = Math.max(1, Math.round(Number(crop.width) || 0));
+        const outH = Math.max(1, Math.round(Number(crop.height) || 0));
+        canvas.width = outW;
+        canvas.height = outH;
+        const ctx = canvas.getContext('2d');
+        const fps = 30;
+
+        const stream = canvas.captureStream(fps);
+        const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' : 'video/webm;codecs=vp8';
+        const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 3_000_000 });
+        const out = [];
+        rec.ondataavailable = e => { if (e.data && e.data.size) out.push(e.data); };
+        rec.onstop = () => {
+          try {
+            const outBlob = new Blob(out, { type: 'video/webm' });
+            resolve(outBlob);
+          } catch (err) { reject(err); }
+        };
+
+        const draw = () => {
+          try {
+            ctx.drawImage(
+              video,
+              Number(crop.x) || 0,
+              Number(crop.y) || 0,
+              Number(crop.width) || outW,
+              Number(crop.height) || outH,
+              0,
+              0,
+              outW,
+              outH
+            );
+          } catch (_) {}
+          if (!video.paused && !video.ended) requestAnimationFrame(draw);
+        };
+
+        video.addEventListener('play', () => { draw(); }, { once: true });
+        video.addEventListener('ended', () => {
+          if (rec.state !== 'inactive') rec.stop();
+          URL.revokeObjectURL(video.src);
+        }, { once: true });
+        video.onerror = () => reject(new Error('Không phát được video để crop'));
+
+        rec.start(250);
+        video.addEventListener('loadedmetadata', () => {
+          video.currentTime = 0;
+          video.play().catch(reject);
+        }, { once: true });
+      } catch (e) {
+        reject(e);
+      }
+    });
+  };
+
+  const saveBlobToDisk = (blob, filename = 'recorded-cropped.webm') => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      URL.revokeObjectURL(a.href);
+      document.body.removeChild(a);
+    }, 1000);
+  };
+
+  const uploadBlobToSearch = async (blob) => {
+    const fd = new FormData();
+    fd.append('video', blob, 'recorded-cropped.webm');
+    await axios.post(`${API_BASE}/search`, fd);
+  };
+
+  const handleCropAndSave = async () => {
+    if (!receivedBlobUrl) return alert('Chưa có video đã nhận');
+    setProcessing(true);
+    setRecStatus('Đang crop video...');
+    try {
+      const res = await fetch(receivedBlobUrl);
+      const srcBlob = await res.blob();
+      const cropped = await cropVideoBlob(srcBlob, cropRect);
+      saveBlobToDisk(cropped);
+      setRecStatus('Đã crop và lưu file.');
+    } catch (e) {
+      setRecStatus('Lỗi crop/lưu: ' + e.message);
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  const handleCropAndSearch = async () => {
+    if (!receivedBlobUrl) return alert('Chưa có video đã nhận');
+    setProcessing(true);
+    setRecStatus('Đang crop và tải lên tìm kiếm...');
+    try {
+      const res = await fetch(receivedBlobUrl);
+      const srcBlob = await res.blob();
+      const cropped = await cropVideoBlob(srcBlob, cropRect);
+      await uploadBlobToSearch(cropped);
+      setRecStatus('Đã tải lên. Vào mục kết quả để xem.');
+    } catch (e) {
+      setRecStatus('Lỗi crop/tải lên: ' + e.message);
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  const openTabB = () => {
+    if (!tabBUrl) return alert('Nhập URL Tab B');
+    window.open(tabBUrl, 'record_tab_b');
+  };
+
   // (Đã bỏ) Nút tải lại không còn cần thiết do auto-refresh
 
   // === NÚT XÓA TOÀN BỘ RECORD (RESET DB) ===
@@ -263,6 +478,74 @@ function App() {
 
         <div className={`status ${status.startsWith('Lỗi') ? 'err' : status ? 'ok' : ''}`}>
           {status}
+        </div>
+
+        {/* === GHI TỪ TAB B (RECEIVER) === */}
+        <div className="panel" style={{ marginTop: 16 }}>
+          <h2 style={{ marginBottom: 8 }}>Ghi từ Tab B & gửi về Tab A</h2>
+          <div className="grid grid-2">
+            <div className="form-group">
+              <label className="label">URL Tab B (trang chứa video)</label>
+              <input
+                className="input"
+                type="text"
+                value={tabBUrl}
+                onChange={(e) => setTabBUrl(e.target.value)}
+                placeholder="https://..."
+              />
+            </div>
+            <div className="form-group">
+              <label className="label">Hành động</label>
+              <div className="actions">
+                <button className="btn btn-secondary" onClick={openTabB}>Mở Tab B</button>
+                {!isListening ? (
+                  <button className="btn btn-primary" onClick={startListening}>Bắt đầu lắng nghe</button>
+                ) : (
+                  <button className="btn btn-danger" onClick={stopListening}>Dừng lắng nghe</button>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-4" style={{ marginTop: 8 }}>
+            <div className="form-group">
+              <label className="label">Crop X</label>
+              <input className="input" type="number" value={cropRect.x} onChange={(e) => setCropRect({ ...cropRect, x: Number(e.target.value) })} />
+            </div>
+            <div className="form-group">
+              <label className="label">Crop Y</label>
+              <input className="input" type="number" value={cropRect.y} onChange={(e) => setCropRect({ ...cropRect, y: Number(e.target.value) })} />
+            </div>
+            <div className="form-group">
+              <label className="label">Crop Width</label>
+              <input className="input" type="number" value={cropRect.width} onChange={(e) => setCropRect({ ...cropRect, width: Number(e.target.value) })} />
+            </div>
+            <div className="form-group">
+              <label className="label">Crop Height</label>
+              <input className="input" type="number" value={cropRect.height} onChange={(e) => setCropRect({ ...cropRect, height: Number(e.target.value) })} />
+            </div>
+          </div>
+
+          <div className={`status ${recStatus.startsWith('Lỗi') ? 'err' : recStatus ? 'ok' : ''}`} style={{ marginTop: 8 }}>
+            {recStatus}
+          </div>
+
+          {receivedBlobUrl ? (
+            <div className="actions" style={{ marginTop: 8 }}>
+              <video src={receivedBlobUrl} controls style={{ maxWidth: '100%', borderRadius: 6 }} />
+              <button className="btn btn-success" disabled={processing} onClick={handleCropAndSave}>
+                {processing ? 'Đang xử lý...' : 'Crop & Lưu file'}
+              </button>
+              <button className="btn btn-primary" disabled={processing} onClick={handleCropAndSearch}>
+                {processing ? 'Đang xử lý...' : 'Crop & Tải lên tìm kiếm'}
+              </button>
+            </div>
+          ) : null}
+
+          <div className="form-group" style={{ marginTop: 12 }}>
+            <label className="label">Đoạn script (dán vào Console của Tab B để bắt đầu ghi)</label>
+            <textarea className="input" rows={8} readOnly value={`(() => {\n  const channel = 'video-record';\n  const bc = ('BroadcastChannel' in window) ? new BroadcastChannel(channel) : null;\n  const send = (msg) => {\n    try { if (bc) bc.postMessage(msg); } catch(_) {}\n    try { if (window.opener) window.opener.postMessage(msg, '*'); } catch(_) {}\n    try { if (window.parent && window.parent !== window) window.parent.postMessage(msg, '*'); } catch(_) {}\n  };\n  const video = document.querySelector('video');\n  if (!video) { alert('Không tìm thấy thẻ <video>'); return; }\n  const capture = video.captureStream ? video.captureStream() : (video.mozCaptureStream && video.mozCaptureStream());\n  if (!capture) { alert('Trình duyệt không hỗ trợ captureStream'); return; }\n  const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' : 'video/webm;codecs=vp8';\n  const rec = new MediaRecorder(capture, { mimeType: mime, videoBitsPerSecond: 3000000 });\n  send({ type: 'record:init', mimeType: mime });\n  rec.ondataavailable = e => { if (e.data && e.data.size) { e.data.arrayBuffer().then(buf => send({ type: 'record:chunk', payload: buf })); } };\n  rec.onstop = () => send({ type: 'record:done' });\n  rec.onerror = e => send({ type: 'record:error', error: String(e.error || e.name || 'unknown') });\n  rec.start(500);\n  video.play().catch(() => {});\n  window.__stopRecorder = () => { if (rec.state !== 'inactive') rec.stop(); };\n  alert('Đang ghi... Gọi window.__stopRecorder() trong Tab B để dừng.');\n})();`} />
+          </div>
         </div>
 
         <div className="table-wrap">
