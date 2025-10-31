@@ -13,6 +13,7 @@ METADATA_FILE = os.path.join(VECTOR_FOLDER, "video_metadata.pkl")
 START_TIME = 5  # Bắt đầu từ giây thứ 5
 END_TIME = 35  # Kết thúc ở giây thứ 35
 SAMPLE_RATE = 0.5  # Lấy mẫu mỗi 0.5 giây
+VERIFY_RATE = 0.1  # Lấy mẫu mỗi 0.1 giây
 MAX_FRAMES = int((END_TIME - START_TIME) / SAMPLE_RATE)  # 60 khung hình
 
 # Model

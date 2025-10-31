@@ -71,6 +71,12 @@ body {
 .btn-primary:hover { background: var(--primary-600); }
 .btn-secondary { background: #0b1324; border-color: var(--border); }
 .btn-secondary:hover { border-color: #2b3a54; }
+.btn-danger { background: var(--danger); color: #fff; }
+.btn-danger:hover { filter: brightness(0.95); }
+.btn-success { background: var(--success); color: #fff; }
+.btn-success:hover { filter: brightness(0.95); }
+.btn-small { padding: 6px 10px; border-radius: 8px; font-size: 12px; }
+.row-actions { display: inline-flex; gap: 8px; align-items: center; }
 
 .status { margin-top: 10px; color: var(--muted); min-height: 18px; }
 .status.ok { color: var(--success); }
@@ -89,3 +95,120 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
 
 .footer { margin-top: 24px; color: var(--muted); font-size: 13px; text-align: center; }
 
+/* === VIDEO SECTION (HIỂN THỊ VIDEO KẾT QUẢ) === */
+.video-full {
+  width: 100vw;
+  margin-left: calc(50% - 50vw);
+  margin-right: calc(50% - 50vw);
+  background: #06090f;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: 32px 24px 48px;
+}
+
+.video-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.video-heading {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.video-actions {
+  display: flex;
+  gap: 10px;
+}
+
+/* === Lưới hiển thị video === */
+.video-grid-full {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
+  justify-items: center;
+}
+
+@media (max-width: 1024px) {
+  .video-grid-full {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .video-grid-full {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* === Thẻ video === */
+.video-card-full {
+  width: 100%;
+  max-width: 600px;
+  background: var(--panel);
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  box-shadow: 0 6px 20px rgba(0,0,0,0.35);
+  transition: transform 0.25s ease, box-shadow 0.25s ease;
+}
+
+.video-card-full:hover {
+  transform: translateY(-6px);
+  box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+}
+
+/* === Khung video, giữ đúng tỷ lệ 16:9 === */
+.video-wrapper {
+  position: relative;
+  width: 100%;
+  padding-top: 56.25%; /* 16:9 aspect ratio */
+  background: #000;
+}
+
+.video-wrapper video {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border: none;
+}
+
+/* === Meta thông tin video === */
+.video-meta-full {
+  padding: 10px 12px;
+  background: var(--panel-2);
+  text-align: center;
+  color: var(--text);
+  border-top: 1px solid var(--border);
+}
+
+.video-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: #fff;
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.video-sub {
+  color: var(--success);
+  font-weight: 700;
+  font-size: 13px;
+}
+
+/* === Khi không có video === */
+.video-empty-full {
+  color: var(--muted);
+  padding: 24px 0;
+  text-align: center;
+  font-size: 15px;
+}
