@@ -30,6 +30,21 @@ function App() {
   const [segmentDuration, setSegmentDuration] = useState(15);
   const segmentTimerRef = useRef(null);
 
+  // === AUTO SPLIT (CLIENT-SIDE AD DETECTION) ===
+  const [autoSplit, setAutoSplit] = useState(false);
+  const detectStepSecRef = useRef(0.5); // sampling step in seconds
+  const detectThresholdRef = useRef(14); // Hamming threshold (0-64)
+  const detectMinGapSecRef = useRef(10); // not used in FE debounce; reserved if needed
+  const templateHashRef = useRef(null); // BigInt
+  const detectionTimerRef = useRef(null);
+  const smallCanvasRef = useRef(null);
+  const captureStreamRef = useRef(null); // stream from canvas.captureStream
+  const matchRecorderRef = useRef(null);
+  const matchChunksRef = useRef([]);
+  const matchActiveRef = useRef(false);
+  const lastAdDetectAtRef = useRef(0);
+  const adActiveRef = useRef(false);
+
   const getVideoUrl = (p) => `${API_BASE}/video?path=${encodeURIComponent(p || '')}`;
   const [verifying, setVerifying] = useState({});
   const [verifyProgress, setVerifyProgress] = useState({});
@@ -365,6 +380,7 @@ function App() {
 
       // === CAPTURE STREAM ===
       const stream = canvas.captureStream(30);
+      captureStreamRef.current = stream;
       let chosenMime = '';
       try {
         if (window.MediaRecorder && typeof MediaRecorder.isTypeSupported === 'function') {
@@ -403,8 +419,19 @@ function App() {
       };
 
       mediaRecorderRef.current.start();
-      startSegmentTimer();
-      setRecordStatus(`Đang ghi (${crop.width}×${crop.height}, ${segmentDuration}s/segment)`);
+      if (!autoSplit) startSegmentTimer();
+      setRecordStatus(`Đang ghi (${crop.width}×${crop.height}${autoSplit ? ', auto split' : `, ${segmentDuration}s/segment`})`);
+
+      // Start auto-split detection if enabled
+      if (autoSplit) {
+        try {
+          await ensureTemplateHash();
+          startAutoSplitDetection();
+        } catch (e) {
+          setRecordStatus('Không tải được template để auto split');
+          setAutoSplit(false);
+        }
+      }
     } else {
       // Mỗi lần dừng ghi, xóa log cũ
       setUploadLogs([]);
@@ -413,6 +440,13 @@ function App() {
       recordingRef.current = false;
       clearTimeout(segmentTimerRef.current);
       setRecordStatus("Đã dừng ghi");
+
+      // Stop auto-split detection and flush match if active
+      stopAutoSplitDetection();
+      if (matchActiveRef.current) {
+        try { matchRecorderRef.current?.stop(); } catch (_) {}
+        matchActiveRef.current = false;
+      }
     }
   };
 
@@ -424,6 +458,230 @@ function App() {
         mediaRecorderRef.current.stop();
       }
     }, segmentDuration * 1000);
+  };
+
+  // === AUTO SPLIT HELPERS ===
+  const resetForNewMatch = async () => {
+    try {
+      setRecordStatus('Đang reset dữ liệu (ván mới)...');
+      await axios.delete(`${API_BASE}/reset`);
+      setResults([]);
+      setRequestId(null);
+      setShowReload(false);
+      setRecordStatus('Đã reset cho ván mới');
+    } catch (err) {
+      setRecordStatus('Lỗi reset (ván mới): ' + (err.response?.data?.error || err.message));
+    }
+  };
+
+  const ensureSmallCanvas = () => {
+    if (!smallCanvasRef.current) {
+      const c = document.createElement('canvas');
+      c.width = 8; c.height = 8;
+      smallCanvasRef.current = c;
+    }
+    return smallCanvasRef.current;
+  };
+
+  const aHashFromCanvas = (sourceCanvas) => {
+    const small = ensureSmallCanvas();
+    const sctx = small.getContext('2d');
+    sctx.clearRect(0,0,8,8);
+    try { sctx.drawImage(sourceCanvas, 0, 0, 8, 8); } catch (_) { return null; }
+    const { data } = sctx.getImageData(0,0,8,8);
+    let sum = 0;
+    const gray = new Array(64);
+    for (let i = 0; i < 64; i++) {
+      const idx = i * 4;
+      const r = data[idx], g = data[idx+1], b = data[idx+2];
+      const v = 0.299*r + 0.587*g + 0.114*b;
+      gray[i] = v;
+      sum += v;
+    }
+    const mean = sum / 64;
+    let bits = 0n;
+    for (let i = 0; i < 64; i++) {
+      bits = (bits << 1n) | (gray[i] > mean ? 1n : 0n);
+    }
+    return bits; // BigInt
+  };
+
+  const popcount64 = (x) => {
+    let c = 0;
+    let v = x < 0n ? -x : x;
+    while (v > 0n) { c += Number(v & 1n); v >>= 1n; }
+    return c;
+  };
+
+  const hamming64 = (a, b) => {
+    if (a == null || b == null) return 64;
+    return popcount64(a ^ b);
+  };
+
+  const computeTemplateHash = (videoEl) => new Promise((resolve, reject) => {
+    const small = ensureSmallCanvas();
+    const sctx = small.getContext('2d');
+    const samples = [];
+    const onMeta = () => {
+      const dur = Math.max(0.1, videoEl.duration || 1);
+      const times = [dur*0.2, dur*0.4, dur*0.6, dur*0.8];
+      let idx = 0;
+      const step = () => {
+        if (idx >= times.length) {
+          if (!samples.length) return reject(new Error('no samples'));
+          let ones = new Array(64).fill(0);
+          for (const h of samples) {
+            for (let i = 0; i < 64; i++) {
+              const bit = (h >> BigInt(63 - i)) & 1n;
+              if (bit === 1n) ones[i] += 1;
+            }
+          }
+          let out = 0n;
+          for (let i = 0; i < 64; i++) {
+            out = (out << 1n) | (ones[i] >= Math.ceil(samples.length/2) ? 1n : 0n);
+          }
+          resolve(out);
+          return;
+        }
+        const onSeek = () => {
+          try {
+            sctx.clearRect(0,0,8,8);
+            sctx.drawImage(videoEl, 0, 0, 8, 8);
+            const img = sctx.getImageData(0,0,8,8).data;
+            let sum = 0; const g = new Array(64);
+            for (let i = 0; i < 64; i++) { const k = i*4; const v = 0.299*img[k]+0.587*img[k+1]+0.114*img[k+2]; g[i]=v; sum+=v; }
+            const mean = sum/64; let bits = 0n;
+            for (let i = 0; i < 64; i++) bits = (bits<<1n) | (g[i] > mean ? 1n : 0n);
+            samples.push(bits);
+            idx += 1;
+            setTimeout(step, 50);
+          } catch (e) {
+            reject(e);
+          } finally {
+            videoEl.removeEventListener('seeked', onSeek);
+          }
+        };
+        videoEl.addEventListener('seeked', onSeek);
+        videoEl.currentTime = times[idx];
+      };
+      step();
+    };
+    if (isNaN(videoEl.duration) || !isFinite(videoEl.duration) || (videoEl.duration || 0) === 0) {
+      videoEl.addEventListener('loadedmetadata', onMeta, { once: true });
+    } else {
+      onMeta();
+    }
+    videoEl.addEventListener('error', () => reject(new Error('template load error')), { once: true });
+    try { videoEl.load(); } catch (_) {}
+  });
+
+  const ensureTemplateHash = async () => {
+    if (templateHashRef.current) return templateHashRef.current;
+    const v = document.createElement('video');
+    v.muted = true; v.crossOrigin = 'anonymous'; v.src = `${API_BASE}/template`;
+    try {
+      const h = await computeTemplateHash(v);
+      templateHashRef.current = h;
+      return h;
+    } catch (e) {
+      console.error('Template hash failed', e);
+      throw e;
+    }
+  };
+
+  const saveAutoMatch = async (blob) => {
+    const file = new File([blob], `auto_${Date.now()}.webm`, { type: 'video/webm' });
+    const fd = new FormData();
+    fd.append('video', file);
+    const logId = (window?.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(16).slice(2)}`);
+    const startedAt = new Date().toLocaleTimeString();
+    setUploadLogs(prev => [...prev.slice(-29), {
+      id: logId,
+      time: startedAt,
+      name: file.name,
+      sizeKB: Math.round(file.size / 1024),
+      status: 'auto-uploading'
+    }]);
+    try {
+      const res = await axios.post(`${API_BASE}/save-video-auto`, fd);
+      setRecordStatus(`Auto-saved: ${res.data.filename}`);
+      setUploadLogs(prev => prev.map(l => l.id === logId ? { ...l, status: 'auto-saved', serverFile: res.data.filename, serverPath: res.data.path } : l));
+    } catch (err) {
+      setRecordStatus('Lỗi auto-save: ' + (err.response?.data?.error || err.message));
+      setUploadLogs(prev => prev.map(l => l.id === logId ? { ...l, status: 'auto-error', error: (err.response?.data?.error || err.message) } : l));
+    }
+  };
+
+  const startMatchRecorder = () => {
+    if (!captureStreamRef.current || matchActiveRef.current) return;
+    matchChunksRef.current = [];
+    let mr;
+    try {
+      mr = new MediaRecorder(captureStreamRef.current, { mimeType: 'video/webm;codecs=vp8,opus' });
+    } catch (_) {
+      mr = new MediaRecorder(captureStreamRef.current);
+    }
+    matchRecorderRef.current = mr;
+    mr.ondataavailable = e => { if (e.data.size > 0) matchChunksRef.current.push(e.data); };
+    mr.onstop = async () => {
+      const blob = new Blob(matchChunksRef.current, { type: 'video/webm' });
+      matchChunksRef.current = [];
+      try { await saveAutoMatch(blob); } catch (_) {}
+    };
+    mr.start();
+    matchActiveRef.current = true;
+    try {
+      setRecordStatus('Đang ghi trận (auto)');
+      setUploadLogs(prev => [...prev.slice(-29), { id: `auto_start_${Date.now()}`, time: new Date().toLocaleTimeString(), status: 'auto-start', info: 'Bắt đầu trận (auto)' }]);
+    } catch(_) {}
+  };
+
+  const stopMatchRecorder = () => {
+    if (!matchActiveRef.current) return;
+    try { matchRecorderRef.current?.stop(); } catch (_) {}
+    matchActiveRef.current = false;
+    try {
+      setRecordStatus('Kết thúc trận (auto)');
+      setUploadLogs(prev => [...prev.slice(-29), { id: `auto_stop_${Date.now()}`, time: new Date().toLocaleTimeString(), status: 'auto-stop', info: 'Kết thúc trận (auto)' }]);
+    } catch(_) {}
+  };
+
+  const startAutoSplitDetection = () => {
+    stopAutoSplitDetection();
+    lastAdDetectAtRef.current = 0;
+    adActiveRef.current = false;
+    detectionTimerRef.current = setInterval(() => {
+      try {
+        if (!canvasRef.current) return;
+        const h = aHashFromCanvas(canvasRef.current);
+        if (h == null) return;
+        const th = templateHashRef.current;
+        const dist = hamming64(th, h);
+        const now = performance.now() / 1000;
+        const debounce = Math.max(1, detectStepSecRef.current);
+        if (dist <= detectThresholdRef.current) {
+          if (!adActiveRef.current) {
+            adActiveRef.current = true; // ad start
+            if (matchActiveRef.current) stopMatchRecorder();
+          }
+          lastAdDetectAtRef.current = now;
+        } else {
+          if (adActiveRef.current && (now - lastAdDetectAtRef.current) >= debounce) {
+            adActiveRef.current = false; // ad ended → start of a new match
+            if (!matchActiveRef.current) {
+              // Reset DB and queues for the new match, then start recording
+              resetForNewMatch().finally(() => startMatchRecorder());
+            }
+          }
+        }
+      } catch (_) {}
+    }, Math.max(200, detectStepSecRef.current * 1000));
+  };
+
+  const stopAutoSplitDetection = () => {
+    if (detectionTimerRef.current) clearInterval(detectionTimerRef.current);
+    detectionTimerRef.current = null;
+    adActiveRef.current = false;
   };
 
   const saveVideoToDisk = async (blob) => {
@@ -556,6 +814,12 @@ function App() {
                 <span className="label">Segment (s):</span>
                 <input type="number" value={segmentDuration} onChange={e => setSegmentDuration(+e.target.value)} min="1" max="60" className="input" style={{width:60}} />
               </div>
+            <div className="form-group inline" style={{marginLeft: 12}}>
+              <label style={{display:'flex',alignItems:'center',gap:6}}>
+                <input type="checkbox" checked={autoSplit} onChange={e => setAutoSplit(e.target.checked)} />
+                <span>Auto Split</span>
+              </label>
+            </div>
             </div>
 
             {!previewing && (

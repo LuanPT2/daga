@@ -35,7 +35,9 @@ const PORT = process.env.PORT || 5050;
 const HOST = process.env.HOST || '127.0.0.1';
 const UPLOAD_DIR = path.join(APP_ROOT, 'uploads');
 const LIVESTREAM_DIR = path.join(APP_ROOT, 'visitdeo-livestream');
+const VIDEO_OUT_DIR = path.join(APP_ROOT, 'video');
 const SOURCE_DIR = path.join(APP_ROOT, 'source');
+const TEMPLATE_DIR = path.join(APP_ROOT, 'video_cut');
 const SEARCH_SCRIPT = path.join(SOURCE_DIR, 'search_video.py');
 const EXTRACT_SCRIPT = path.join(SOURCE_DIR, 'extract_features.py');
 
@@ -49,11 +51,14 @@ const upload = multer({
 });
 fsPromises.mkdir(UPLOAD_DIR, { recursive: true }).catch(() => {});
 fsPromises.mkdir(LIVESTREAM_DIR, { recursive: true }).catch(() => {});
+fsPromises.mkdir(VIDEO_OUT_DIR, { recursive: true }).catch(() => {});
+fsPromises.mkdir(TEMPLATE_DIR, { recursive: true }).catch(() => {});
 
 app.use(cors());
 app.use(express.json());
 app.use('/uploads', express.static(UPLOAD_DIR));
 app.use('/video', express.static(LIVESTREAM_DIR));
+app.use('/video-out', express.static(VIDEO_OUT_DIR));
 
 app.use((req, res, next) => {
   req.id = crypto.randomUUID().slice(0, 8);
@@ -338,6 +343,33 @@ const uploadLivestream = multer({
   }
 });
 
+// Save auto-match videos directly into VIDEO_OUT_DIR with sequential names videoauto_{00001}.mov
+const uploadAutoMatch = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, VIDEO_OUT_DIR),
+    filename: async (_req, file, cb) => {
+      try {
+        const ext = '.mov';
+        // Scan existing files to find next index
+        const names = fs.readdirSync(VIDEO_OUT_DIR).filter(n => /^videoauto_\d{5}\.mov$/.test(n));
+        const nums = names.map(n => Number(n.match(/(\d{5})/)[1] || '0')).filter(n => !isNaN(n));
+        const next = (nums.length ? Math.max(...nums) : 0) + 1;
+        const name = `videoauto_${String(next).padStart(5, '0')}${ext}`;
+        cb(null, name);
+      } catch (e) {
+        // Fallback to timestamp name
+        const name = `videoauto_${Date.now()}.mov`;
+        cb(null, name);
+      }
+    }
+  }),
+  limits: { fileSize: 500 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const allowed = ['video/mp4', 'video/avi', 'video/mkv', 'video/webm', 'video/quicktime'];
+    cb(null, allowed.includes(file.mimetype));
+  }
+});
+
 app.post('/save-video', uploadLivestream.single('video'), async (req, res) => {
   try {
     if (!req.file) {
@@ -355,6 +387,55 @@ app.post('/save-video', uploadLivestream.single('video'), async (req, res) => {
   } catch (e) {
     console.error(`[${req.id}] [SAVE-VIDEO] ERROR: ${e.message}`);
     return res.status(500).json({ error: e.message || 'Save failed' });
+  }
+});
+
+// Save auto-split match video with sequential naming into VIDEO_OUT_DIR
+app.post('/save-video-auto', uploadAutoMatch.single('video'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No video uploaded' });
+    const savedPath = path.join(VIDEO_OUT_DIR, req.file.filename);
+    console.log(`[${req.id}] [SAVE-AUTO] -> ${savedPath}`);
+    return res.json({ success: true, path: savedPath, filename: req.file.filename });
+  } catch (e) {
+    console.error(`[${req.id}] [SAVE-AUTO] ERROR: ${e.message}`);
+    return res.status(500).json({ error: e.message || 'Save failed' });
+  }
+});
+
+// Serve template ad/logo clip for client-side detection (default path video_cut/cut.mov)
+app.get('/template', async (_req, res) => {
+  try {
+    const templatePath = path.join(APP_ROOT, 'video_cut', 'cut.mov');
+    if (!fs.existsSync(templatePath)) return res.status(404).json({ error: 'Template not found' });
+    const stat = await fsPromises.stat(templatePath);
+    res.writeHead(200, {
+      'Content-Length': stat.size,
+      'Content-Type': 'video/quicktime',
+      'Accept-Ranges': 'bytes'
+    });
+    fs.createReadStream(templatePath).pipe(res);
+  } catch (e) {
+    console.error('[TEMPLATE] error:', e.message);
+    return res.status(500).json({ error: 'Template stream error' });
+  }
+});
+
+// List all template clips under TEMPLATE_DIR (absolute paths)
+app.get('/templates', async (_req, res) => {
+  try {
+    const allowedExts = new Set(['.mp4', '.mov', '.avi', '.mkv', '.webm']);
+    let files = [];
+    try {
+      const names = await fsPromises.readdir(TEMPLATE_DIR);
+      files = names
+        .filter(name => allowedExts.has(path.extname(name).toLowerCase()))
+        .map(name => path.join(TEMPLATE_DIR, name));
+    } catch (_) {}
+    return res.json({ templates: files });
+  } catch (e) {
+    console.error('[TEMPLATES] error:', e.message);
+    return res.status(500).json({ error: 'List templates error' });
   }
 });
 
@@ -438,7 +519,7 @@ app.get('/search/result/:requestId', async (req, res) => {
     if (job.status === 'failed') return res.json({ status: 'failed', error: job.error });
 
     const [results] = await pool.query(
-      'SELECT `rank_no` AS `result_rank`, video_name AS name, similarity, video_path AS path FROM search_results WHERE request_id = ? ORDER BY `rank_no`',
+      'SELECT `rank_no` AS `result_rank`, video_name AS name, similarity, video_path AS path, created_at FROM search_results WHERE request_id = ? ORDER BY `rank_no`',
       [requestId]
     );
 
@@ -448,7 +529,8 @@ app.get('/search/result/:requestId', async (req, res) => {
         rank: Number(r.result_rank),
         name: String(r.name),
         similarity: Number(r.similarity),
-        path: String(r.path)
+        path: String(r.path),
+        created_at: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at)
       }))
     });
 
@@ -539,7 +621,8 @@ app.get('/search/latest', async (_req, res) => {
     const [rows] = await pool.query(
       `SELECT r.video_path AS path,
               MAX(r.video_name) AS name,
-              AVG(r.similarity) AS avg_similarity
+              AVG(r.similarity) AS avg_similarity,
+              MAX(r.created_at) AS created_at
        FROM search_results r
        JOIN search_requests q ON q.request_id = r.request_id
        WHERE q.status = 'completed'
@@ -552,7 +635,8 @@ app.get('/search/latest', async (_req, res) => {
       rank: i + 1,
       name: String(r.name || 'Unknown'),
       similarity: Number(r.avg_similarity || 0),
-      path: String(r.path)
+      path: String(r.path),
+      created_at: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at)
     }));
 
     return res.json({ status: 'completed', results });
@@ -593,7 +677,8 @@ app.get('/video', async (req, res) => {
     const allowedDirs = [
       path.join(APP_ROOT, 'video'),
       path.join(APP_ROOT, 'visitdeo-livestream'),
-      path.join(APP_ROOT, 'uploads')
+      path.join(APP_ROOT, 'uploads'),
+      TEMPLATE_DIR
     ];
     const isAllowed = allowedDirs.some(dir => filePath.startsWith(dir + path.sep) || filePath === dir);
     if (!isAllowed) return res.status(403).json({ error: 'Path not allowed' });
