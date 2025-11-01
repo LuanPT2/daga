@@ -297,14 +297,26 @@ function App() {
   };
 
   // === RECORD (CANVAS ẨN, KHÔNG TRÀN) ===
-  const toggleRecording = () => {
+  const toggleRecording = async () => {
     if (!previewing) return setRecordStatus("Start preview trước!");
 
     if (!recording) {
+      // Mỗi lần bắt đầu ghi, xóa log cũ
+      setUploadLogs([]);
       // Bắt buộc phải chọn vùng cắt trước khi bắt đầu ghi
       if (!selection || selection.width <= 0 || selection.height <= 0) {
         try { window.alert('Vui lòng kéo chọn vùng cắt trước khi Start Record!'); } catch (_) {}
         setRecordStatus('Chưa chọn vùng cắt');
+        return;
+      }
+
+      // Reset DB và thư mục livestream trước khi ghi
+      try {
+        setRecordStatus('Đang reset dữ liệu...');
+        await axios.delete(`${API_BASE}/reset`);
+        setRecordStatus('Đã reset dữ liệu, chuẩn bị ghi...');
+      } catch (err) {
+        setRecordStatus('Lỗi reset: ' + (err.response?.data?.error || err.message));
         return;
       }
 
@@ -394,6 +406,8 @@ function App() {
       startSegmentTimer();
       setRecordStatus(`Đang ghi (${crop.width}×${crop.height}, ${segmentDuration}s/segment)`);
     } else {
+      // Mỗi lần dừng ghi, xóa log cũ
+      setUploadLogs([]);
       mediaRecorderRef.current?.stop();
       setRecording(false);
       recordingRef.current = false;
@@ -550,7 +564,6 @@ function App() {
               </p>
             )}
 
-            <div className={`status ${recordStatus.startsWith('Lỗi') ? 'err' : recordStatus ? 'ok' : ''}`}>{recordStatus}</div>
 
             {/* Upload logs moved below preview */}
 
@@ -571,6 +584,7 @@ function App() {
                 }} />
               )}
             </div>
+            <div className={`status ${recordStatus.startsWith('Lỗi') ? 'err' : recordStatus ? 'ok' : ''}`}>{recordStatus}</div>
 
             <canvas ref={canvasRef} style={{ position: 'absolute', left: '-9999px', visibility: 'hidden' }} />
 
@@ -578,7 +592,7 @@ function App() {
             {uploadLogs.some(l => l.status === 'saved') && (
               <div style={{ marginTop: 10, fontSize: 12, color: 'var(--muted)' }}>
                 <div style={{ fontWeight: 700, color: 'var(--text)', marginBottom: 6 }}>Upload log</div>
-                <div style={{ maxHeight: 100, overflow: 'auto', border: '1px solid var(--border)', borderRadius: 8, padding: 8, background: '#0b1324' }}>
+                <div style={{ maxHeight: 70, overflow: 'auto', border: '1px solid var(--border)', borderRadius: 8, padding: 8, background: '#0b1324' }}>
                   {uploadLogs.filter(l => l.status === 'saved').slice(-5).reverse().map((l, idx) => (
                     <div key={l.id || `saved_${idx}`} style={{ display: 'flex', gap: 8, alignItems: 'baseline', padding: '2px 0' }}>
                       <span style={{ minWidth: 74, color: 'var(--muted)' }}>[{l.time}]</span>
