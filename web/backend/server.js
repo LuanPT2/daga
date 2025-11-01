@@ -34,6 +34,7 @@ const app = express();
 const PORT = process.env.PORT || 5050;
 const HOST = process.env.HOST || '127.0.0.1';
 const UPLOAD_DIR = path.join(APP_ROOT, 'uploads');
+const LIVESTREAM_DIR = path.join(APP_ROOT, 'visitdeo-livestream');
 const SOURCE_DIR = path.join(APP_ROOT, 'source');
 const SEARCH_SCRIPT = path.join(SOURCE_DIR, 'search_video.py');
 const EXTRACT_SCRIPT = path.join(SOURCE_DIR, 'extract_features.py');
@@ -47,10 +48,12 @@ const upload = multer({
   },
 });
 fsPromises.mkdir(UPLOAD_DIR, { recursive: true }).catch(() => {});
+fsPromises.mkdir(LIVESTREAM_DIR, { recursive: true }).catch(() => {});
 
 app.use(cors());
 app.use(express.json());
 app.use('/uploads', express.static(UPLOAD_DIR));
+app.use('/video', express.static(LIVESTREAM_DIR));
 
 app.use((req, res, next) => {
   req.id = crypto.randomUUID().slice(0, 8);
@@ -298,16 +301,53 @@ async function runSearchJob(videoPath, requestId, shouldCleanup = true) {
 app.get('/', (_, res) => res.send('Video Similarity Backend Running'));
 app.get('/health', (_, res) => res.json({ ok: true, python: VENV_PYTHON }));
 
+// Save uploaded video directly to livestream folder (no search job)
+const uploadLivestream = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, LIVESTREAM_DIR),
+    filename: (_req, file, cb) => {
+      const ext = path.extname(file.originalname) || '.webm';
+      const name = `record_${Date.now()}${ext}`;
+      cb(null, name);
+    }
+  }),
+  limits: { fileSize: 200 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const allowed = ['video/mp4', 'video/avi', 'video/mkv', 'video/webm', 'video/quicktime'];
+    cb(null, allowed.includes(file.mimetype));
+  }
+});
+
+app.post('/save-video', uploadLivestream.single('video'), async (req, res) => {
+  try {
+    if (!req.file) {
+      console.warn(`[${req.id}] [SAVE-VIDEO] No file in request`);
+      return res.status(400).json({ error: 'No video uploaded' });
+    }
+    const savedPath = path.join(LIVESTREAM_DIR, req.file.filename);
+    console.log(
+      `[${req.id}] [SAVE-VIDEO] ${req.file.originalname || req.file.filename} ` +
+      `(${req.file.mimetype || 'unknown'}, ${req.file.size || 0}B) -> ${savedPath}`
+    );
+    return res.json({ success: true, path: savedPath, filename: req.file.filename });
+  } catch (e) {
+    console.error(`[${req.id}] [SAVE-VIDEO] ERROR: ${e.message}`);
+    return res.status(500).json({ error: e.message || 'Save failed' });
+  }
+});
+
 app.post('/search', upload.single('video'), async (req, res) => {
   const requestId = crypto.randomUUID();
   let videoPath;
 
   let shouldCleanup = false;
+  console.log(`[${req.id}] [SEARCH] start request_id=${requestId}`);
 
   if (req.file) {
     // Trường hợp upload video
     videoPath = path.resolve(req.file.path);
     shouldCleanup = true;
+    console.log(`[${req.id}] [SEARCH] source=upload file=${req.file.originalname || req.file.filename} saved=${videoPath}`);
   } else if (req.body.path) {
     // Trường hợp nhập đường dẫn
     videoPath = path.resolve(req.body.path);
@@ -331,6 +371,7 @@ app.post('/search', upload.single('video'), async (req, res) => {
         );
         setImmediate(() => runSearchJob(filePath, rid, false));
         requestIds.push(rid);
+        console.log(`[${req.id}] [SEARCH] queued request_id=${rid} path=${filePath}`);
       }
       return res.json({ batch: true, count: requestIds.length, request_ids: requestIds, request_id: requestIds[0] });
     } else {
@@ -339,6 +380,7 @@ app.post('/search', upload.single('video'), async (req, res) => {
       if (!['.mp4', '.mov', '.avi', '.mkv', '.webm'].includes(ext)) {
         return res.status(400).json({ error: 'File không phải là video hợp lệ' });
       }
+      console.log(`[${req.id}] [SEARCH] source=path file=${videoPath}`);
     }
   } else {
     return res.status(400).json({ error: 'Cần upload video hoặc nhập đường dẫn thư mục' });
@@ -351,9 +393,11 @@ app.post('/search', upload.single('video'), async (req, res) => {
     );
 
     setImmediate(() => runSearchJob(videoPath, requestId, shouldCleanup));
+    console.log(`[${req.id}] [SEARCH] queued request_id=${requestId} path=${videoPath}`);
     res.json({ request_id: requestId, status: 'pending', check_url: `/search/result/${requestId}` });
   } catch (e) {
     if (req.file) await fsPromises.unlink(videoPath).catch(() => {});
+    console.error(`[${req.id}] [SEARCH] DB error: ${e.message}`);
     res.status(500).json({ error: 'DB error' });
   }
 });
