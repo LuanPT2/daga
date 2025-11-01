@@ -141,3 +141,13 @@ CREATE TABLE `search_results` (
   CONSTRAINT `search_results_ibfk_1` FOREIGN KEY (`request_id`) REFERENCES `search_requests` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 ```
+
+
+
+
+Bạn xem lại với
+khi bấm nút start record thì có 2 xử lý
+1 là mỗi 15s lưu vào /Users/luanpt/Downloads/video_daga/visitdeo-livestream
+2 là mỗi trận thì lưu vào đây /Users/luanpt/Downloads/video_daga/video
+làm sao xác định được mỗi trận . vì mỗi trận có quảng cáo, tôi đã đưa các đoạn quảng cáo vào /Users/luanpt/Downloads/video_daga/video_cut 
+chỉ cần kiểm tra giữ 2 lần quảng cáo alf biết hết 1 trận

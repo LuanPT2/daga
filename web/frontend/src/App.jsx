@@ -32,20 +32,27 @@ function App() {
 
   // === AUTO SPLIT (CLIENT-SIDE AD DETECTION) ===
   const [autoSplit, setAutoSplit] = useState(false);
-  const detectStepSecRef = useRef(0.5); // sampling step in seconds
-  const detectThresholdRef = useRef(14); // Hamming threshold (0-64)
-  const detectMinGapSecRef = useRef(10); // not used in FE debounce; reserved if needed
-  const templateHashRef = useRef(null); // BigInt
+  const detectStepSecRef = useRef(2); // Đồng bộ với Python
+  const detectThresholdRef = useRef(20); // Đồng bộ với Python
+  const detectMinGapSecRef = useRef(10); // Đồng bộ với Python
+  const templateHashesRef = useRef({}); // { path: BigInt }
   const detectionTimerRef = useRef(null);
   const smallCanvasRef = useRef(null);
-  const captureStreamRef = useRef(null); // stream from canvas.captureStream
+  const captureStreamRef = useRef(null);
   const matchRecorderRef = useRef(null);
   const matchChunksRef = useRef([]);
   const matchActiveRef = useRef(false);
   const lastAdDetectAtRef = useRef(0);
   const adActiveRef = useRef(false);
+  const lastDetectLogAtRef = useRef(0);
 
   const getVideoUrl = (p) => `${API_BASE}/video?path=${encodeURIComponent(p || '')}`;
+  const formatTime = (v) => {
+    if (!v) return '';
+    try {
+      return new Date(v).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    } catch (_) { return String(v); }
+  };
   const [verifying, setVerifying] = useState({});
   const [verifyProgress, setVerifyProgress] = useState({});
   const [verifyResult, setVerifyResult] = useState({});
@@ -284,8 +291,15 @@ function App() {
       const videoTrack = newStream.getVideoTracks()[0];
       if (videoTrack) {
         videoTrack.addEventListener('ended', () => {
+          console.warn('[FE] videoTrack ended (screen share stopped)');
           stopPreview();
         });
+        videoTrack.addEventListener('mute', () => { console.warn('[FE] videoTrack mute'); });
+        videoTrack.addEventListener('unmute', () => { console.warn('[FE] videoTrack unmute'); });
+      }
+      const audioTrack = newStream.getAudioTracks && newStream.getAudioTracks()[0];
+      if (audioTrack) {
+        audioTrack.addEventListener('ended', () => { console.warn('[FE] audioTrack ended'); });
       }
 
     } catch (err) {
@@ -320,7 +334,7 @@ function App() {
       setUploadLogs([]);
       // Bắt buộc phải chọn vùng cắt trước khi bắt đầu ghi
       if (!selection || selection.width <= 0 || selection.height <= 0) {
-        try { window.alert('Vui lòng kéo chọn vùng cắt trước khi Start Record!'); } catch (_) {}
+        window.alert('Vui lòng kéo chọn vùng cắt trước khi Start Record!');
         setRecordStatus('Chưa chọn vùng cắt');
         return;
       }
@@ -382,28 +396,26 @@ function App() {
       const stream = canvas.captureStream(30);
       captureStreamRef.current = stream;
       let chosenMime = '';
-      try {
-        if (window.MediaRecorder && typeof MediaRecorder.isTypeSupported === 'function') {
-          if (MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')) chosenMime = 'video/webm;codecs=vp8,opus';
-          else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')) chosenMime = 'video/webm;codecs=vp9,opus';
-          else if (MediaRecorder.isTypeSupported('video/webm')) chosenMime = 'video/webm';
-        }
-      } catch (_) {}
+      if (window.MediaRecorder && typeof MediaRecorder.isTypeSupported === 'function') {
+        if (MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')) chosenMime = 'video/webm;codecs=vp8,opus';
+        else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')) chosenMime = 'video/webm;codecs=vp9,opus';
+        else if (MediaRecorder.isTypeSupported('video/webm')) chosenMime = 'video/webm';
+      }
       mediaRecorderRef.current = chosenMime ? new MediaRecorder(stream, { mimeType: chosenMime }) : new MediaRecorder(stream);
       recordedChunksRef.current = [];
 
-      try { console.log('[FE] MediaRecorder start', { mime: chosenMime || '(default)' }); } catch(_) {}
+      console.log('[FE] MediaRecorder start', { mime: chosenMime || '(default)' });
 
       mediaRecorderRef.current.onstart = () => {
         setUploadLogs(prev => [...prev.slice(-29), { id: `start_${Date.now()}`, time: new Date().toLocaleTimeString(), status: 'rec-start', info: `Bắt đầu ghi (${chosenMime || 'default'})` }]);
       };
       mediaRecorderRef.current.ondataavailable = e => {
         if (e.data.size > 0) recordedChunksRef.current.push(e.data);
-        try { console.log('[FE] ondataavailable', e.data.size); } catch(_) {}
+        console.log('[FE] ondataavailable', e.data.size);
       };
 
       mediaRecorderRef.current.onerror = (e) => {
-        try { console.error('[FE] MediaRecorder error', e.error || e); } catch(_) {}
+        console.error('[FE] MediaRecorder error', e.error || e);
       };
 
       mediaRecorderRef.current.onstop = () => {
@@ -419,16 +431,16 @@ function App() {
       };
 
       mediaRecorderRef.current.start();
-      if (!autoSplit) startSegmentTimer();
-      setRecordStatus(`Đang ghi (${crop.width}×${crop.height}${autoSplit ? ', auto split' : `, ${segmentDuration}s/segment`})`);
+      startSegmentTimer();
+      setRecordStatus(`Đang ghi (${crop.width}×${crop.height}${autoSplit ? ', auto split + 15s' : `, ${segmentDuration}s/segment`})`);
 
       // Start auto-split detection if enabled
       if (autoSplit) {
         try {
-          await ensureTemplateHash();
+          await loadTemplates();
           startAutoSplitDetection();
         } catch (e) {
-          setRecordStatus('Không tải được template để auto split');
+          setRecordStatus('Không tải được templates để auto split');
           setAutoSplit(false);
         }
       }
@@ -444,7 +456,7 @@ function App() {
       // Stop auto-split detection and flush match if active
       stopAutoSplitDetection();
       if (matchActiveRef.current) {
-        try { matchRecorderRef.current?.stop(); } catch (_) {}
+        matchRecorderRef.current?.stop();
         matchActiveRef.current = false;
       }
     }
@@ -485,7 +497,7 @@ function App() {
 
   const aHashFromCanvas = (sourceCanvas) => {
     const small = ensureSmallCanvas();
-    const sctx = small.getContext('2d');
+    const sctx = small.getContext('2d', { willReadFrequently: true });
     sctx.clearRect(0,0,8,8);
     try { sctx.drawImage(sourceCanvas, 0, 0, 8, 8); } catch (_) { return null; }
     const { data } = sctx.getImageData(0,0,8,8);
@@ -518,79 +530,87 @@ function App() {
     return popcount64(a ^ b);
   };
 
-  const computeTemplateHash = (videoEl) => new Promise((resolve, reject) => {
-    const small = ensureSmallCanvas();
-    const sctx = small.getContext('2d');
-    const samples = [];
-    const onMeta = () => {
-      const dur = Math.max(0.1, videoEl.duration || 1);
-      const times = [dur*0.2, dur*0.4, dur*0.6, dur*0.8];
-      let idx = 0;
-      const step = () => {
-        if (idx >= times.length) {
-          if (!samples.length) return reject(new Error('no samples'));
-          let ones = new Array(64).fill(0);
-          for (const h of samples) {
-            for (let i = 0; i < 64; i++) {
-              const bit = (h >> BigInt(63 - i)) & 1n;
-              if (bit === 1n) ones[i] += 1;
-            }
-          }
-          let out = 0n;
-          for (let i = 0; i < 64; i++) {
-            out = (out << 1n) | (ones[i] >= Math.ceil(samples.length/2) ? 1n : 0n);
-          }
-          resolve(out);
-          return;
-        }
-        const onSeek = () => {
-          try {
-            sctx.clearRect(0,0,8,8);
-            sctx.drawImage(videoEl, 0, 0, 8, 8);
-            const img = sctx.getImageData(0,0,8,8).data;
-            let sum = 0; const g = new Array(64);
-            for (let i = 0; i < 64; i++) { const k = i*4; const v = 0.299*img[k]+0.587*img[k+1]+0.114*img[k+2]; g[i]=v; sum+=v; }
-            const mean = sum/64; let bits = 0n;
-            for (let i = 0; i < 64; i++) bits = (bits<<1n) | (g[i] > mean ? 1n : 0n);
-            samples.push(bits);
-            idx += 1;
-            setTimeout(step, 50);
-          } catch (e) {
-            reject(e);
-          } finally {
-            videoEl.removeEventListener('seeked', onSeek);
-          }
-        };
-        videoEl.addEventListener('seeked', onSeek);
-        videoEl.currentTime = times[idx];
-      };
-      step();
-    };
-    if (isNaN(videoEl.duration) || !isFinite(videoEl.duration) || (videoEl.duration || 0) === 0) {
-      videoEl.addEventListener('loadedmetadata', onMeta, { once: true });
-    } else {
-      onMeta();
-    }
-    videoEl.addEventListener('error', () => reject(new Error('template load error')), { once: true });
-    try { videoEl.load(); } catch (_) {}
-  });
-
-  const ensureTemplateHash = async () => {
-    if (templateHashRef.current) return templateHashRef.current;
-    const v = document.createElement('video');
-    v.muted = true; v.crossOrigin = 'anonymous'; v.src = `${API_BASE}/template`;
+  // Load all templates from folder and compute hashes
+  const loadTemplates = async () => {
     try {
-      const h = await computeTemplateHash(v);
-      templateHashRef.current = h;
-      return h;
+      const res = await axios.get(`${API_BASE}/templates`);
+      const templates = res.data.templates || [];
+      if (!templates.length) throw new Error('No templates in folder');
+      const hashes = {};
+      for (const tmplPath of templates) {
+        hashes[tmplPath] = await computeTemplateHash(tmplPath);
+      }
+      templateHashesRef.current = hashes;
+      console.log('[FE][AutoSplit] Loaded templates:', Object.keys(hashes));
     } catch (e) {
-      console.error('Template hash failed', e);
-      throw e;
+      console.error('[FE][AutoSplit] Load templates failed:', e.message);
+      setRecordStatus('Lỗi load templates folder');
     }
   };
 
+  const computeTemplateHash = async (tmplPath) => {
+    const v = document.createElement('video');
+    v.muted = true; v.crossOrigin = 'anonymous'; v.src = getVideoUrl(tmplPath);
+    return new Promise((resolve, reject) => {
+      const small = ensureSmallCanvas();
+      const sctx = small.getContext('2d', { willReadFrequently: true });
+      const samples = [];
+      const onMeta = () => {
+        const dur = Math.max(0.1, v.duration || 1);
+        const times = [dur*0.2, dur*0.4, dur*0.6, dur*0.8];
+        let idx = 0;
+        const step = () => {
+          if (idx >= times.length) {
+            if (!samples.length) return reject(new Error('no samples'));
+            let ones = new Array(64).fill(0);
+            for (const h of samples) {
+              for (let i = 0; i < 64; i++) {
+                const bit = (h >> BigInt(63 - i)) & 1n;
+                if (bit === 1n) ones[i] += 1;
+              }
+            }
+            let out = 0n;
+            for (let i = 0; i < 64; i++) {
+              out = (out << 1n) | (ones[i] >= Math.ceil(samples.length/2) ? 1n : 0n);
+            }
+            resolve(out);
+            return;
+          }
+          const onSeek = () => {
+            try {
+              sctx.clearRect(0,0,8,8);
+              sctx.drawImage(v, 0, 0, 8, 8);
+              const img = sctx.getImageData(0,0,8,8).data;
+              let sum = 0; const g = new Array(64);
+              for (let i = 0; i < 64; i++) { const k = i*4; const v = 0.299*img[k]+0.587*img[k+1]+0.114*img[k+2]; g[i]=v; sum+=v; }
+              const mean = sum/64; let bits = 0n;
+              for (let i = 0; i < 64; i++) bits = (bits<<1n) | (g[i] > mean ? 1n : 0n);
+              samples.push(bits);
+              idx += 1;
+              setTimeout(step, 50);
+            } catch (e) {
+              reject(e);
+            } finally {
+              v.removeEventListener('seeked', onSeek);
+            }
+          };
+          v.addEventListener('seeked', onSeek);
+          v.currentTime = times[idx];
+        };
+        step();
+      };
+      if (isNaN(v.duration) || !isFinite(v.duration) || (v.duration || 0) === 0) {
+        v.addEventListener('loadedmetadata', onMeta, { once: true });
+      } else {
+        onMeta();
+      }
+      v.addEventListener('error', () => reject(new Error('template load error')), { once: true });
+      try { v.load(); } catch (_) {}
+    });
+  };
+
   const saveAutoMatch = async (blob) => {
-    const file = new File([blob], `auto_${Date.now()}.webm`, { type: 'video/webm' });
+    const file = new File([blob], `record_match_${Date.now()}.webm`, { type: 'video/webm' });
     const fd = new FormData();
     fd.append('video', file);
     const logId = (window?.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(16).slice(2)}`);
@@ -605,7 +625,7 @@ function App() {
     try {
       const res = await axios.post(`${API_BASE}/save-video-auto`, fd);
       setRecordStatus(`Auto-saved: ${res.data.filename}`);
-      setUploadLogs(prev => prev.map(l => l.id === logId ? { ...l, status: 'auto-saved', serverFile: res.data.filename, serverPath: res.data.path } : l));
+      setUploadLogs(prev => prev.map(l => l.id === logId ? { ...l, status: 'auto-saved', localFile: file.name, serverFile: res.data.filename, serverPath: res.data.path } : l));
     } catch (err) {
       setRecordStatus('Lỗi auto-save: ' + (err.response?.data?.error || err.message));
       setUploadLogs(prev => prev.map(l => l.id === logId ? { ...l, status: 'auto-error', error: (err.response?.data?.error || err.message) } : l));
@@ -626,50 +646,62 @@ function App() {
     mr.onstop = async () => {
       const blob = new Blob(matchChunksRef.current, { type: 'video/webm' });
       matchChunksRef.current = [];
+      console.log('[FE][AutoSplit] match recorder stopped, uploading...');
       try { await saveAutoMatch(blob); } catch (_) {}
     };
     mr.start();
     matchActiveRef.current = true;
-    try {
-      setRecordStatus('Đang ghi trận (auto)');
-      setUploadLogs(prev => [...prev.slice(-29), { id: `auto_start_${Date.now()}`, time: new Date().toLocaleTimeString(), status: 'auto-start', info: 'Bắt đầu trận (auto)' }]);
-    } catch(_) {}
+    setRecordStatus('Đang ghi trận (auto)');
+    setUploadLogs(prev => [...prev.slice(-29), { id: `auto_start_${Date.now()}`, time: new Date().toLocaleTimeString(), status: 'auto-start', info: 'Bắt đầu trận (auto)' }]);
+    console.log('[FE][AutoSplit] match recorder started');
   };
 
   const stopMatchRecorder = () => {
     if (!matchActiveRef.current) return;
-    try { matchRecorderRef.current?.stop(); } catch (_) {}
+    matchRecorderRef.current?.stop();
     matchActiveRef.current = false;
-    try {
-      setRecordStatus('Kết thúc trận (auto)');
-      setUploadLogs(prev => [...prev.slice(-29), { id: `auto_stop_${Date.now()}`, time: new Date().toLocaleTimeString(), status: 'auto-stop', info: 'Kết thúc trận (auto)' }]);
-    } catch(_) {}
+    setRecordStatus('Kết thúc trận (auto)');
+    setUploadLogs(prev => [...prev.slice(-29), { id: `auto_stop_${Date.now()}`, time: new Date().toLocaleTimeString(), status: 'auto-stop', info: 'Kết thúc trận (auto)' }]);
+    console.log('[FE][AutoSplit] match recorder stop requested');
   };
 
   const startAutoSplitDetection = () => {
     stopAutoSplitDetection();
     lastAdDetectAtRef.current = 0;
     adActiveRef.current = false;
+    console.log('[FE][AutoSplit] detection started', { step: detectStepSecRef.current, threshold: detectThresholdRef.current, min_gap: detectMinGapSecRef.current });
     detectionTimerRef.current = setInterval(() => {
       try {
         if (!canvasRef.current) return;
         const h = aHashFromCanvas(canvasRef.current);
         if (h == null) return;
-        const th = templateHashRef.current;
-        const dist = hamming64(th, h);
+        let best_dist = 64;
+        let best_tmpl = null;
+        for (const [tmpl, ref_h] of Object.entries(templateHashesRef.current)) {
+          const dist = hamming64(ref_h, h);
+          if (dist < best_dist) {
+            best_dist = dist;
+            best_tmpl = tmpl;
+          }
+        }
         const now = performance.now() / 1000;
-        const debounce = Math.max(1, detectStepSecRef.current);
-        if (dist <= detectThresholdRef.current) {
+        const debounce = detectMinGapSecRef.current;
+        if ((now - (lastDetectLogAtRef.current || 0)) >= 1) {
+          console.log('[FE][AutoSplit] tick', { best_dist, threshold: detectThresholdRef.current, adActive: adActiveRef.current, best_tmpl });
+          lastDetectLogAtRef.current = now;
+        }
+        if (best_dist <= detectThresholdRef.current) {
           if (!adActiveRef.current) {
-            adActiveRef.current = true; // ad start
+            adActiveRef.current = true;
+            console.log('[FE][AutoSplit] AD START', { best_dist, best_tmpl });
             if (matchActiveRef.current) stopMatchRecorder();
           }
           lastAdDetectAtRef.current = now;
         } else {
           if (adActiveRef.current && (now - lastAdDetectAtRef.current) >= debounce) {
-            adActiveRef.current = false; // ad ended → start of a new match
+            adActiveRef.current = false;
+            console.log('[FE][AutoSplit] AD END → start match');
             if (!matchActiveRef.current) {
-              // Reset DB and queues for the new match, then start recording
               resetForNewMatch().finally(() => startMatchRecorder());
             }
           }
@@ -768,7 +800,7 @@ function App() {
           <div className="table-wrap">
             <table>
               <thead>
-                <tr><th>#</th><th>Tên</th><th>%</th><th>Verify</th><th></th></tr>
+                <tr><th>#</th><th>Tên</th><th>%</th><th>Thời gian</th><th>Verify</th><th></th></tr>
               </thead>
               <tbody>
                 {results.length > 0 ? results.map(r => (
@@ -776,6 +808,7 @@ function App() {
                     <td>{r.rank}</td>
                     <td>{r.name}</td>
                     <td className="percent">{r.similarity.toFixed(1)}%</td>
+                    <td>{formatTime(r.created_at)}</td>
                     <td className="percent verify-col">
                       {verifyResult[r.path] || '0%'}
                     </td>
@@ -852,17 +885,23 @@ function App() {
 
             <canvas ref={canvasRef} style={{ position: 'absolute', left: '-9999px', visibility: 'hidden' }} />
 
-            {/* Upload logs (only saved entries, last 5 lines), below preview */}
-            {uploadLogs.some(l => l.status === 'saved') && (
+            {/* Upload logs (saved & auto-saved entries, last 5 lines), below preview */}
+            {uploadLogs.some(l => l.status === 'saved' || l.status === 'auto-saved') && (
               <div style={{ marginTop: 10, fontSize: 12, color: 'var(--muted)' }}>
                 <div style={{ fontWeight: 700, color: 'var(--text)', marginBottom: 6 }}>Upload log</div>
                 <div style={{ maxHeight: 70, overflow: 'auto', border: '1px solid var(--border)', borderRadius: 8, padding: 8, background: '#0b1324' }}>
-                  {uploadLogs.filter(l => l.status === 'saved').slice(-5).reverse().map((l, idx) => (
+                  {uploadLogs.filter(l => l.status === 'saved' || l.status === 'auto-saved').slice(-5).reverse().map((l, idx) => (
                     <div key={l.id || `saved_${idx}`} style={{ display: 'flex', gap: 8, alignItems: 'baseline', padding: '2px 0' }}>
                       <span style={{ minWidth: 74, color: 'var(--muted)' }}>[{l.time}]</span>
-                      <span style={{ color: 'var(--success)' }}>
-                        {`Đã lưu ${l.serverFile}`}
-                      </span>
+                      {l.status === 'auto-saved' ? (
+                        <span style={{ color: 'var(--success)' }}>
+                          {`Đã lưu ${l.localFile || 'record_match.webm'}`}
+                        </span>
+                      ) : (
+                        <span style={{ color: 'var(--success)' }}>
+                          {`Đã lưu ${l.serverFile}`}
+                        </span>
+                      )}
                     </div>
                   ))}
                 </div>
