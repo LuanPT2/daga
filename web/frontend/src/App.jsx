@@ -411,7 +411,6 @@ function App() {
       };
       mediaRecorderRef.current.ondataavailable = e => {
         if (e.data.size > 0) recordedChunksRef.current.push(e.data);
-        console.log('[FE] ondataavailable', e.data.size);
       };
 
       mediaRecorderRef.current.onerror = (e) => {
@@ -615,6 +614,7 @@ function App() {
     fd.append('video', file);
     const logId = (window?.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(16).slice(2)}`);
     const startedAt = new Date().toLocaleTimeString();
+    console.log(`[FE][AutoSplit] preparing upload: ${file.name}, size: ${file.size}`);
     setUploadLogs(prev => [...prev.slice(-29), {
       id: logId,
       time: startedAt,
@@ -623,10 +623,13 @@ function App() {
       status: 'auto-uploading'
     }]);
     try {
+      console.log(`[FE][AutoSplit] posting to ${API_BASE}/save-video-auto`);
       const res = await axios.post(`${API_BASE}/save-video-auto`, fd);
+      console.log(`[FE][AutoSplit] upload success:`, res.data);
       setRecordStatus(`Auto-saved: ${res.data.filename}`);
       setUploadLogs(prev => prev.map(l => l.id === logId ? { ...l, status: 'auto-saved', localFile: file.name, serverFile: res.data.filename, serverPath: res.data.path } : l));
     } catch (err) {
+      console.error('[FE][AutoSplit] upload error:', err);
       setRecordStatus('Lỗi auto-save: ' + (err.response?.data?.error || err.message));
       setUploadLogs(prev => prev.map(l => l.id === logId ? { ...l, status: 'auto-error', error: (err.response?.data?.error || err.message) } : l));
     }
@@ -645,13 +648,20 @@ function App() {
     mr.ondataavailable = e => { if (e.data.size > 0) matchChunksRef.current.push(e.data); };
     mr.onstop = async () => {
       const blob = new Blob(matchChunksRef.current, { type: 'video/webm' });
+      const chunkCount = matchChunksRef.current.length;
       matchChunksRef.current = [];
-      console.log('[FE][AutoSplit] match recorder stopped, uploading...');
-      try { await saveAutoMatch(blob); } catch (_) {}
+      console.log(`[FE][AutoSplit] match recorder stopped, blob size: ${blob.size}, chunks: ${chunkCount}, uploading...`);
+      if (blob.size === 0) {
+        console.error('[FE][AutoSplit] blob is empty, skipping upload');
+        return;
+      }
+      setRecordStatus('SaveAutoMatch (auto)');
+      try { await saveAutoMatch(blob); } catch (e) {
+        console.error('[FE][AutoSplit] upload failed:', e);
+      }
     };
     mr.start();
     matchActiveRef.current = true;
-    setRecordStatus('Đang ghi trận (auto)');
     setUploadLogs(prev => [...prev.slice(-29), { id: `auto_start_${Date.now()}`, time: new Date().toLocaleTimeString(), status: 'auto-start', info: 'Bắt đầu trận (auto)' }]);
     console.log('[FE][AutoSplit] match recorder started');
   };
@@ -687,7 +697,7 @@ function App() {
         const now = performance.now() / 1000;
         const debounce = detectMinGapSecRef.current;
         if ((now - (lastDetectLogAtRef.current || 0)) >= 1) {
-          console.log('[FE][AutoSplit] tick', { best_dist, threshold: detectThresholdRef.current, adActive: adActiveRef.current, best_tmpl });
+          // console.log('[FE][AutoSplit] tick', { best_dist, threshold: detectThresholdRef.current, adActive: adActiveRef.current, best_tmpl });
           lastDetectLogAtRef.current = now;
         }
         if (best_dist <= detectThresholdRef.current) {
@@ -723,7 +733,7 @@ function App() {
   
     try {
       setRecordStatus('Đang lưu video vào ổ cứng...');
-      console.log('[FE] POST /save-video start', { name: file.name, size: file.size, type: file.type, url: `${API_BASE}/save-video` });
+      //console.log('[FE] POST /save-video start', { name: file.name, size: file.size, type: file.type, url: `${API_BASE}/save-video` });
       const logId = (window?.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(16).slice(2)}`);
       const startedAt = new Date().toLocaleTimeString();
       setUploadLogs(prev => [...prev.slice(-29), {

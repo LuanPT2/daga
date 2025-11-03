@@ -343,33 +343,6 @@ const uploadLivestream = multer({
   }
 });
 
-// Save auto-match videos directly into VIDEO_OUT_DIR with sequential names videoauto_{00001}.mov
-const uploadAutoMatch = multer({
-  storage: multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, VIDEO_OUT_DIR),
-    filename: async (_req, file, cb) => {
-      try {
-        const ext = '.mov';
-        // Scan existing files to find next index
-        const names = fs.readdirSync(VIDEO_OUT_DIR).filter(n => /^videoauto_\d{5}\.mov$/.test(n));
-        const nums = names.map(n => Number(n.match(/(\d{5})/)[1] || '0')).filter(n => !isNaN(n));
-        const next = (nums.length ? Math.max(...nums) : 0) + 1;
-        const name = `videoauto_${String(next).padStart(5, '0')}${ext}`;
-        cb(null, name);
-      } catch (e) {
-        // Fallback to timestamp name
-        const name = `videoauto_${Date.now()}.mov`;
-        cb(null, name);
-      }
-    }
-  }),
-  limits: { fileSize: 500 * 1024 * 1024 },
-  fileFilter: (_req, file, cb) => {
-    const allowed = ['video/mp4', 'video/avi', 'video/mkv', 'video/webm', 'video/quicktime'];
-    cb(null, allowed.includes(file.mimetype));
-  }
-});
-
 app.post('/save-video', uploadLivestream.single('video'), async (req, res) => {
   try {
     if (!req.file) {
@@ -390,13 +363,42 @@ app.post('/save-video', uploadLivestream.single('video'), async (req, res) => {
   }
 });
 
-// Save auto-split match video with sequential naming into VIDEO_OUT_DIR
+// Đầu file, thay đổi uploadAutoMatch
+const uploadAutoMatch = multer({
+  dest: VIDEO_OUT_DIR, // lưu tạm vào VIDEO_OUT_DIR
+});
+
+// Save auto-split match video with timestamp naming
 app.post('/save-video-auto', uploadAutoMatch.single('video'), async (req, res) => {
+  console.log(`[${req.id}] [SAVE-AUTO] REQUEST RECEIVED`);
   try {
-    if (!req.file) return res.status(400).json({ error: 'No video uploaded' });
-    const savedPath = path.join(VIDEO_OUT_DIR, req.file.filename);
-    console.log(`[${req.id}] [SAVE-AUTO] -> ${savedPath}`);
-    return res.json({ success: true, path: savedPath, filename: req.file.filename });
+    if (!req.file) {
+      console.error(`[${req.id}] [SAVE-AUTO] No file in request`);
+      return res.status(400).json({ error: 'No video uploaded' });
+    }
+
+    // === TẠO TÊN FILE THEO NGÀY GIỜ ===
+    const now = new Date();
+    const timestamp = now.toISOString()
+      .replace(/[-:T]/g, '')
+      .replace(/\.\d+Z$/, ''); // → 20251103154512
+    const newFilename = `videoauto_${timestamp}.webm`;
+
+    // Đường dẫn cũ (tạm) và mới
+    const oldPath = req.file.path;
+    const newPath = path.join(VIDEO_OUT_DIR, newFilename);
+
+    // Đổi tên file
+    await fsPromises.rename(oldPath, newPath);
+
+    console.log(`[${req.id}] [SAVE-AUTO] Renamed: ${path.basename(oldPath)} → ${newFilename}`);
+    console.log(`[${req.id}] [SAVE-AUTO] Saved to: ${newPath}`);
+
+    return res.json({
+      success: true,
+      path: newPath,
+      filename: newFilename
+    });
   } catch (e) {
     console.error(`[${req.id}] [SAVE-AUTO] ERROR: ${e.message}`);
     return res.status(500).json({ error: e.message || 'Save failed' });
