@@ -43,7 +43,7 @@ services:
       - PYTHON_SERVICE_URL=http://192.168.132.134:5051
     volumes:
       # Mount data directory from host
-      - /data/daga/1daga:/data/daga/1daga
+      - D:\3data\1daga:/data/daga/1daga
       # Mount source code for fast development
       - ../../web/backend/server.js:/app/web/backend/server.js
     depends_on:
