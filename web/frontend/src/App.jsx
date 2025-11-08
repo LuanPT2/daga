@@ -3,9 +3,11 @@ import axios from 'axios';
 
 function App() {
   const defaultHost = (typeof window !== 'undefined' && window.location && window.location.hostname) ? window.location.hostname : '127.0.0.1';
-  const API_BASE = `http://${defaultHost}:5050`;
+  const API_BASE = process.env.REACT_APP_API_BASE || `http://${defaultHost}:5050`;
   const [file, setFile] = useState(null);
-  const [path, setPath] = useState('/Users/luanpt/Downloads/video_daga/visitdeo-livestream');
+  // Chỉ dùng đường dẫn Linux cho Docker
+  const defaultPath = process.env.REACT_APP_DEFAULT_PATH || '/data/daga/1daga/5video-livestream';
+  const [path, setPath] = useState(defaultPath);
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const [searchStatus, setSearchStatus] = useState('');
@@ -810,7 +812,7 @@ function App() {
           <div className="table-wrap">
             <table>
               <thead>
-                <tr><th>#</th><th>Tên</th><th>%</th><th>Thời gian</th><th>Verify</th><th></th></tr>
+                <tr><th>#</th><th>Tên</th><th>%</th><th>Kết quả</th><th>Thời gian</th><th>Verify</th><th></th></tr>
               </thead>
               <tbody>
                 {results.length > 0 ? results.map(r => (
@@ -818,6 +820,18 @@ function App() {
                     <td>{r.rank}</td>
                     <td>{r.name}</td>
                     <td className="percent">{r.similarity.toFixed(1)}%</td>
+                    <td>
+                      <select 
+                        value={r.result_match !== null && r.result_match !== undefined ? r.result_match : ''} 
+                        onChange={(e) => updateMatchResult(r, e.target.value)}
+                        className="match-select"
+                        style={{ padding: '4px 8px', fontSize: '14px' }}
+                      >
+                        <option value="">-</option>
+                        <option value="0">Xanh thắng</option>
+                        <option value="1">Đỏ thắng</option>
+                      </select>
+                    </td>
                     <td>{formatTime(r.created_at)}</td>
                     <td className="percent verify-col">
                       {verifyResult[r.path] || '0%'}
@@ -834,7 +848,7 @@ function App() {
                     </td>
                   </tr>
                 )) : (
-                  <tr><td colSpan="5" className="empty">Chưa có dữ liệu</td></tr>
+                  <tr><td colSpan="7" className="empty">Chưa có dữ liệu</td></tr>
                 )}
               </tbody>
             </table>

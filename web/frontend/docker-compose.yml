@@ -1,0 +1,15 @@
+services:
+  # Frontend - React + Nginx
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Build arguments - chỉ có hiệu lực khi build
+        REACT_APP_API_BASE: ${REACT_APP_API_BASE:-http://localhost:5050}
+        REACT_APP_DEFAULT_PATH: ${REACT_APP_DEFAULT_PATH:-/data/daga/1daga/5video-livestream}
+    container_name: frontend-app
+    ports:
+      - "3000:80"  # Map port 80 (nginx) ra port 3000
+    restart: unless-stopped
+

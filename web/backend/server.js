@@ -1,45 +1,35 @@
 // === ĐẦU FILE server.js ===
 const path = require('path');
 const fs = require('fs');
-const { spawn } = require('child_process');
 const crypto = require('crypto');
 const express = require('express');
 const multer = require('multer');
 const fsPromises = require('fs').promises;
 const cors = require('cors');
 const mysql = require('mysql2/promise');
+const axios = require('axios');
+const swaggerJsdoc = require('swagger-jsdoc');
+const swaggerUi = require('swagger-ui-express');
 const verifyJobs = {}; // { verify_id: { status, progress, similarity } }
 
-// ==================== CẤU HÌNH .venv ====================
+// ==================== CẤU HÌNH ====================
 const APP_ROOT = path.resolve(__dirname, '../../../');
-const VENV_DIR = path.join(APP_ROOT, '.venv');
-const VENV_PYTHON = path.join(VENV_DIR, 'bin', 'python');
+// Chỉ dùng environment variable cho Docker
+const DATA_DIR = process.env.DATA_DIR || '/data/daga/1daga';
 
-if (!fs.existsSync(VENV_PYTHON)) {
-  console.error(`[INIT] .venv/bin/python not found!`);
-  console.error(`[INIT] Run: cd ${APP_ROOT} && python3 -m venv .venv`);
-  process.exit(1);
-}
+// Python Processing Service URL
+const PYTHON_SERVICE_URL = process.env.PYTHON_SERVICE_URL || 'http://192.168.132.134:5051';
 
-const venvEnv = {
-  ...process.env,
-  PATH: `${VENV_DIR}/bin:${process.env.PATH}`,
-  VIRTUAL_ENV: VENV_DIR
-};
-
-console.log(`[INIT] Using Python: ${VENV_PYTHON}`);
+console.log(`[INIT] Python Service URL: ${PYTHON_SERVICE_URL}`);
 
 // ==================== CONFIG ====================
 const app = express();
 const PORT = process.env.PORT || 5050;
 const HOST = process.env.HOST || '127.0.0.1';
-const UPLOAD_DIR = path.join(APP_ROOT, 'uploads');
-const LIVESTREAM_DIR = path.join(APP_ROOT, 'visitdeo-livestream');
-const VIDEO_OUT_DIR = path.join(APP_ROOT, 'video');
-const SOURCE_DIR = path.join(APP_ROOT, 'source');
-const TEMPLATE_DIR = path.join(APP_ROOT, 'video_cut');
-const SEARCH_SCRIPT = path.join(SOURCE_DIR, 'search_video.py');
-const EXTRACT_SCRIPT = path.join(SOURCE_DIR, 'extract_features.py');
+const UPLOAD_DIR = path.join(DATA_DIR, '4uploads');
+const LIVESTREAM_DIR = path.join(DATA_DIR, '5video-livestream');
+const VIDEO_OUT_DIR = path.join(DATA_DIR, '2video');
+const TEMPLATE_DIR = path.join(DATA_DIR, '6video_cut');
 
 const upload = multer({
   dest: UPLOAD_DIR,
@@ -60,6 +50,31 @@ app.use('/uploads', express.static(UPLOAD_DIR));
 app.use('/video', express.static(LIVESTREAM_DIR));
 app.use('/video-out', express.static(VIDEO_OUT_DIR));
 
+// ==================== SWAGGER ====================
+const swaggerOptions = {
+  definition: {
+    openapi: '3.0.0',
+    info: {
+      title: 'Video Similarity Search API',
+      version: '1.0.0',
+      description: 'API documentation for Video Similarity Search Backend',
+      contact: {
+        name: 'API Support',
+      },
+    },
+    servers: [
+      {
+        url: `http://localhost:${PORT}`,
+        description: 'Development server',
+      },
+    ],
+  },
+  apis: ['./server.js'], // Path to the API files
+};
+
+const swaggerSpec = swaggerJsdoc(swaggerOptions);
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+
 app.use((req, res, next) => {
   req.id = crypto.randomUUID().slice(0, 8);
   const start = Date.now();
@@ -71,11 +86,13 @@ app.use((req, res, next) => {
 });
 
 // ==================== MYSQL ====================
-const MYSQL_HOST = process.env.MYSQL_HOST || 'mysql.local';
-const MYSQL_PORT = Number(process.env.MYSQL_PORT || 30306);
+const MYSQL_HOST = process.env.MYSQL_HOST || 'localhost';
+const MYSQL_PORT = Number(process.env.MYSQL_PORT || 3306);
 const MYSQL_USER = process.env.MYSQL_USER || 'root';
-const MYSQL_PASSWORD = process.env.MYSQL_PASSWORD || 'rootpassword';
+const MYSQL_PASSWORD = process.env.MYSQL_PASSWORD || 'abcd1234';
 const MYSQL_DB = process.env.MYSQL_DB || 'video_search';
+
+console.log(`[INIT] MySQL Config: ${MYSQL_USER}@${MYSQL_HOST}:${MYSQL_PORT}/${MYSQL_DB}`);
 
 let pool;
 
@@ -134,6 +151,7 @@ async function createTables() {
       video_name VARCHAR(255),
       similarity DECIMAL(6,2),
       video_path TEXT,
+      result_match TINYINT(1) NULL COMMENT '0=xanh thắng, 1=đỏ thắng, NULL=chưa xác định',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       INDEX idx_request_id (request_id),
       CONSTRAINT fk_search_results_request
@@ -143,8 +161,34 @@ async function createTables() {
     `
   ];
 
+  // Execute CREATE TABLE queries
   for (const query of queries) {
     await pool.query(query);
+  }
+
+  // Migration: Add result_match column if table exists but column doesn't
+  try {
+    const [columns] = await pool.query(`
+      SELECT COLUMN_NAME 
+      FROM INFORMATION_SCHEMA.COLUMNS 
+      WHERE TABLE_SCHEMA = DATABASE() 
+      AND TABLE_NAME = 'search_results' 
+      AND COLUMN_NAME = 'result_match'
+    `);
+    
+    if (columns.length === 0) {
+      await pool.query(`
+        ALTER TABLE search_results 
+        ADD COLUMN result_match TINYINT(1) NULL 
+        COMMENT '0=xanh thắng, 1=đỏ thắng, NULL=chưa xác định'
+      `);
+      console.log('[DB] Added result_match column to search_results table');
+    }
+  } catch (e) {
+    // Ignore if column already exists or table doesn't exist yet
+    if (e.code !== 'ER_DUP_FIELDNAME') {
+      console.warn('[DB] Migration warning:', e.message);
+    }
   }
 
   console.log('[DB] Tables created/verified successfully');
@@ -227,64 +271,28 @@ async function runSearchJob(videoPath, requestId, shouldCleanup = true) {
   console.log(`[${logId}] [JOB] STARTED: request_id=${requestId}`);
   console.log(`[${logId}] [JOB] Video: ${videoPath}`);
 
-  let pythonProcess = null;
-
   try {
     await pool.query('UPDATE search_requests SET status = ? WHERE request_id = ?', ['processing', requestId]);
     console.log(`[${logId}] [DB] Set status = processing`);
 
-    console.log(`[${logId}] [PYTHON] EXEC: ${VENV_PYTHON} ${SEARCH_SCRIPT} "${videoPath}" --json`);
-    pythonProcess = spawn(VENV_PYTHON, [SEARCH_SCRIPT, videoPath, '--json'], {
-      cwd: SOURCE_DIR,
-      env: venvEnv,
-      stdio: ['ignore', 'pipe', 'pipe']
+    // Gọi Python service qua HTTP
+    console.log(`[${logId}] [PYTHON] Calling service: ${PYTHON_SERVICE_URL}/search`);
+    const response = await axios.post(`${PYTHON_SERVICE_URL}/search`, {
+      video_path: videoPath
+    }, {
+      timeout: 300000 // 5 minutes timeout
     });
 
-    let output = '', error = '';
-
-    pythonProcess.stdout.on('data', d => {
-      const lines = d.toString().trim().split('\n');
-      lines.forEach(line => {
-        const trimmed = line.trim();
-        // Chấp nhận JSON array [] hoặc object {}
-        if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
-          output += line + '\n';
-        } else if (trimmed) {
-          console.log(`[${logId}] [PY-OUT] ${line}`);
-        }
-      });
-    });
-
-    pythonProcess.stderr.on('data', d => {
-      const lines = d.toString().trim().split('\n');
-      lines.forEach(line => line && console.error(`[${logId}] [PY-ERR] ${line}`));
-      error += d.toString();
-    });
-
-    console.log(`[${logId}] [PYTHON] Process started (PID: ${pythonProcess.pid})`);
-
-    const exitCode = await new Promise(resolve => {
-      pythonProcess.on('close', resolve);
-      pythonProcess.on('error', () => resolve(1));
-    });
-
-    console.log(`[${logId}] [PYTHON] Exited with code: ${exitCode}`);
-
-    if (exitCode !== 0) throw new Error(error || `Exit code: ${exitCode}`);
-    if (!output.trim()) throw new Error('No JSON output from Python');
-
-    let results;
-    try {
-      results = JSON.parse(output.trim());
-      console.log(`[${logId}] [PYTHON] Parsed ${results.length} results`);
-    } catch (e) {
-      console.error(`[${logId}] [PYTHON] JSON parse failed: ${e.message}`);
-      throw new Error('Invalid JSON from Python');
+    const results = response.data;
+    if (!Array.isArray(results)) {
+      throw new Error('Invalid response from Python service');
     }
+
+    console.log(`[${logId}] [PYTHON] Received ${results.length} results`);
 
     const values = results.slice(0, 20).map((r, idx) => {
       const rawPath = String(r.video_path || '');
-      const absPath = path.isAbsolute(rawPath) ? rawPath : path.resolve(SOURCE_DIR, rawPath);
+      const absPath = path.isAbsolute(rawPath) ? rawPath : path.resolve(rawPath);
       return [
         requestId,
         Number(r.rank) || (idx + 1),
@@ -305,6 +313,9 @@ async function runSearchJob(videoPath, requestId, shouldCleanup = true) {
 
   } catch (e) {
     console.error(`[${logId}] [JOB] FAILED: ${e.message}`);
+    if (e.response) {
+      console.error(`[${logId}] [PYTHON] Service error: ${e.response.data}`);
+    }
     try {
       await pool.query(
         'UPDATE search_requests SET status = ?, error = ? WHERE request_id = ?',
@@ -312,7 +323,6 @@ async function runSearchJob(videoPath, requestId, shouldCleanup = true) {
       );
     } catch (_) {}
   } finally {
-    if (pythonProcess) pythonProcess.kill();
     if (shouldCleanup) {
       await fsPromises.unlink(videoPath).catch(() => {});
       console.log(`[${logId}] [CLEANUP] Deleted uploaded file`);
@@ -323,8 +333,55 @@ async function runSearchJob(videoPath, requestId, shouldCleanup = true) {
 }
 
 // ==================== ROUTES ====================
+/**
+ * @swagger
+ * /:
+ *   get:
+ *     summary: Root endpoint
+ *     tags: [General]
+ *     responses:
+ *       200:
+ *         description: Backend is running
+ */
 app.get('/', (_, res) => res.send('Video Similarity Backend Running'));
-app.get('/health', (_, res) => res.json({ ok: true, python: VENV_PYTHON }));
+
+/**
+ * @swagger
+ * /health:
+ *   get:
+ *     summary: Health check endpoint
+ *     tags: [General]
+ *     description: Check if backend and Python service are running
+ *     responses:
+ *       200:
+ *         description: All services are healthy
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status:
+ *                   type: string
+ *                 backend:
+ *                   type: string
+ *                 python:
+ *                   type: string
+ *       500:
+ *         description: Service unavailable
+ */
+app.get('/health', async (_, res) => {
+  try {
+    // Check Python service health
+    const pyHealth = await axios.get(`${PYTHON_SERVICE_URL}/health`).catch(() => null);
+    res.json({ 
+      ok: true, 
+      python_service: pyHealth ? 'connected' : 'disconnected',
+      python_service_url: PYTHON_SERVICE_URL
+    });
+  } catch (e) {
+    res.json({ ok: true, python_service: 'disconnected', error: e.message });
+  }
+});
 
 // Save uploaded video directly to livestream folder (no search job)
 const uploadLivestream = multer({
@@ -405,10 +462,38 @@ app.post('/save-video-auto', uploadAutoMatch.single('video'), async (req, res) =
   }
 });
 
+/**
+ * @swagger
+ * /template:
+ *   get:
+ *     summary: Get template video for client-side detection
+ *     tags: [Templates]
+ *     description: Stream the default template video (cut.mov) for client-side ad/logo detection
+ *     responses:
+ *       200:
+ *         description: Template video stream
+ *         content:
+ *           video/quicktime:
+ *             schema:
+ *               type: string
+ *               format: binary
+ *       404:
+ *         description: Template not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   example: Template not found
+ *       500:
+ *         description: Server error
+ */
 // Serve template ad/logo clip for client-side detection (default path video_cut/cut.mov)
 app.get('/template', async (_req, res) => {
   try {
-    const templatePath = path.join(APP_ROOT, 'video_cut', 'cut.mov');
+    const templatePath = path.join(TEMPLATE_DIR, 'cut.mov');
     if (!fs.existsSync(templatePath)) return res.status(404).json({ error: 'Template not found' });
     const stat = await fsPromises.stat(templatePath);
     res.writeHead(200, {
@@ -423,24 +508,130 @@ app.get('/template', async (_req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /templates:
+ *   get:
+ *     summary: List all template videos
+ *     tags: [Templates]
+ *     description: Get list of all template video files in the template directory (/data/daga/1daga/6video_cut)
+ *     responses:
+ *       200:
+ *         description: List of template paths (may be empty if no templates found)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 templates:
+ *                   type: array
+ *                   items:
+ *                     type: string
+ *                   description: Array of absolute paths to template video files
+ *                   example: ["/data/daga/1daga/6video_cut/cut.mov", "/data/daga/1daga/6video_cut/ad1.mp4"]
+ *                 message:
+ *                   type: string
+ *                   description: Optional message (e.g., if directory doesn't exist)
+ *                   example: "Template directory does not exist"
+ *       500:
+ *         description: Server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                 details:
+ *                   type: string
+ */
 // List all template clips under TEMPLATE_DIR (absolute paths)
 app.get('/templates', async (_req, res) => {
   try {
     const allowedExts = new Set(['.mp4', '.mov', '.avi', '.mkv', '.webm']);
     let files = [];
+    
+    // Check if template directory exists
+    if (!fs.existsSync(TEMPLATE_DIR)) {
+      console.warn(`[TEMPLATES] Directory does not exist: ${TEMPLATE_DIR}`);
+      return res.json({ templates: [], message: 'Template directory does not exist' });
+    }
+    
     try {
       const names = await fsPromises.readdir(TEMPLATE_DIR);
       files = names
         .filter(name => allowedExts.has(path.extname(name).toLowerCase()))
         .map(name => path.join(TEMPLATE_DIR, name));
-    } catch (_) {}
+      
+      console.log(`[TEMPLATES] Found ${files.length} template(s) in ${TEMPLATE_DIR}`);
+      if (files.length === 0) {
+        console.warn(`[TEMPLATES] No video files found in ${TEMPLATE_DIR}. Allowed extensions: ${Array.from(allowedExts).join(', ')}`);
+      }
+    } catch (readError) {
+      console.error(`[TEMPLATES] Failed to read directory ${TEMPLATE_DIR}:`, readError.message);
+      return res.status(500).json({ error: `Cannot read template directory: ${readError.message}` });
+    }
+    
     return res.json({ templates: files });
   } catch (e) {
     console.error('[TEMPLATES] error:', e.message);
-    return res.status(500).json({ error: 'List templates error' });
+    return res.status(500).json({ error: 'List templates error', details: e.message });
   }
 });
 
+/**
+ * @swagger
+ * /search:
+ *   post:
+ *     summary: Search for similar videos
+ *     tags: [Search]
+ *     description: Upload a video file or provide a path to search for similar videos. Can handle single file or directory (batch search).
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               video:
+ *                 type: string
+ *                 format: binary
+ *                 description: Video file to search
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               path:
+ *                 type: string
+ *                 description: Path to video file or directory on server
+ *                 example: "/data/daga/1daga/2video/sample.mp4"
+ *     responses:
+ *       200:
+ *         description: Search request created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 requestId:
+ *                   type: string
+ *                   description: Unique request ID for tracking search progress
+ *                   example: "550e8400-e29b-41d4-a716-446655440000"
+ *                 message:
+ *                   type: string
+ *                   example: "Search job started"
+ *       400:
+ *         description: Bad request (invalid path, no video files, etc.)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *       500:
+ *         description: Server error
+ */
 app.post('/search', upload.single('video'), async (req, res) => {
   const requestId = crypto.randomUUID();
   let videoPath;
@@ -521,7 +712,7 @@ app.get('/search/result/:requestId', async (req, res) => {
     if (job.status === 'failed') return res.json({ status: 'failed', error: job.error });
 
     const [results] = await pool.query(
-      'SELECT `rank_no` AS `result_rank`, video_name AS name, similarity, video_path AS path, created_at FROM search_results WHERE request_id = ? ORDER BY `rank_no`',
+      'SELECT `rank_no` AS `result_rank`, video_name AS name, similarity, video_path AS path, result_match, created_at FROM search_results WHERE request_id = ? ORDER BY `rank_no`',
       [requestId]
     );
 
@@ -532,6 +723,7 @@ app.get('/search/result/:requestId', async (req, res) => {
         name: String(r.name),
         similarity: Number(r.similarity),
         path: String(r.path),
+        result_match: r.result_match !== null ? Number(r.result_match) : null,
         created_at: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at)
       }))
     });
@@ -542,8 +734,78 @@ app.get('/search/result/:requestId', async (req, res) => {
   }
 });
 
-// === THAY ĐỔI: Dùng verify_video.py ===
-const VERIFY_SCRIPT = path.join(SOURCE_DIR, 'verify_video.py');
+/**
+ * @swagger
+ * /search/result/{requestId}/match:
+ *   put:
+ *     summary: Update match result for a search result
+ *     tags: [Search]
+ *     description: Update result_match field (0=xanh thắng, 1=đỏ thắng, null=chưa xác định)
+ *     parameters:
+ *       - in: path
+ *         name: requestId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Request ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - video_path
+ *               - result_match
+ *             properties:
+ *               video_path:
+ *                 type: string
+ *                 description: Video path to identify the result
+ *               result_match:
+ *                 type: integer
+ *                 nullable: true
+ *                 enum: [0, 1, null]
+ *                 description: 0=xanh thắng, 1=đỏ thắng, null=chưa xác định
+ *                 example: 0
+ *     responses:
+ *       200:
+ *         description: Updated successfully
+ *       400:
+ *         description: Bad request
+ *       404:
+ *         description: Result not found
+ *       500:
+ *         description: Server error
+ */
+app.put('/search/result/:requestId/match', async (req, res) => {
+  const { requestId } = req.params;
+  const { video_path, result_match } = req.body;
+
+  if (!video_path) {
+    return res.status(400).json({ error: 'Thiếu video_path' });
+  }
+
+  // Validate result_match: must be 0, 1, or null
+  if (result_match !== null && result_match !== 0 && result_match !== 1) {
+    return res.status(400).json({ error: 'result_match phải là 0, 1 hoặc null' });
+  }
+
+  try {
+    const [updateResult] = await pool.query(
+      'UPDATE search_results SET result_match = ? WHERE request_id = ? AND video_path = ?',
+      [result_match, requestId, video_path]
+    );
+
+    if (updateResult.affectedRows === 0) {
+      return res.status(404).json({ error: 'Không tìm thấy kết quả' });
+    }
+
+    res.json({ success: true, result_match });
+  } catch (e) {
+    console.error(`[${req.id || '??'}] [UPDATE MATCH] error:`, e.message);
+    res.status(500).json({ error: 'Lỗi server' });
+  }
+});
 
 app.post('/verify/start', async (req, res) => {
   const { path: videoPath } = req.body || {};
@@ -555,55 +817,24 @@ app.post('/verify/start', async (req, res) => {
 
   setImmediate(async () => {
     try {
-      const python = spawn(VENV_PYTHON, [
-        VERIFY_SCRIPT,
-        videoPath,
-        '--json'
-      ], {
-        cwd: SOURCE_DIR,
-        env: venvEnv,
-        stdio: ['ignore', 'pipe', 'pipe']
+      // Gọi Python service qua HTTP
+      const response = await axios.post(`${PYTHON_SERVICE_URL}/verify`, {
+        video_path: videoPath
+      }, {
+        timeout: 300000 // 5 minutes
       });
-
-      let output = '', error = '';
-      python.stdout.on('data', d => {
-        const lines = d.toString().trim().split('\n');
-        lines.forEach(line => {
-          if (line.startsWith('PROGRESS:')) {
-            const match = line.match(/PROGRESS:\s*(\d+)/);
-            if (match) verifyJobs[verifyId].progress = Number(match[1]);
-          } else if (line.trim() && line.startsWith('{')) {
-            output += line + '\n';
-          } else {
-            console.log(`[VERIFY] ${line}`);
-          }
-        });
-      });
-      python.stderr.on('data', d => error += d.toString());
-
-      const code = await new Promise(r => {
-        python.on('close', r);
-        python.on('error', () => r(1));
-      });
-
-      if (code !== 0) throw new Error(error || `Exit ${code}`);
-      if (!output.trim()) throw new Error('Không có JSON');
-
-      let data;
-      try {
-        const jsonLine = output.trim().split('\n').find(l => l.trim().startsWith('{'));
-        data = JSON.parse(jsonLine || '{}');
-      } catch (e) {
-        throw new Error("Parse JSON failed");
-      }
 
       verifyJobs[verifyId] = {
         status: 'completed',
         progress: 100,
-        similarity: data.similarity || 0,
+        similarity: response.data.similarity || 0,
       };
     } catch (e) {
+      console.error(`[VERIFY] Error: ${e.message}`);
       verifyJobs[verifyId] = { status: 'failed', error: e.message };
+      if (e.response) {
+        console.error(`[VERIFY] Service error: ${JSON.stringify(e.response.data)}`);
+      }
     }
   });
 
@@ -648,18 +879,26 @@ app.get('/search/latest', async (_req, res) => {
   }
 });
 
-app.post('/update-db', (req, res) => {
-  const python = spawn(VENV_PYTHON, [EXTRACT_SCRIPT], { cwd: SOURCE_DIR, env: venvEnv });
-  let output = '', error = '';
-  const timeout = setTimeout(() => python.kill('SIGKILL'), 120000);
-
-  python.stdout.on('data', d => { output += d; console.log(`[PY-OUT] ${d}`); });
-  python.stderr.on('data', d => { error += d; console.error(`[PY-ERR] ${d}`); });
-
-  python.on('close', code => {
-    clearTimeout(timeout);
-    code === 0 ? res.json({ success: true }) : res.status(500).json({ error: error || 'Python failed' });
-  });
+app.post('/update-db', async (req, res) => {
+  try {
+    // Gọi Python service qua HTTP
+    const response = await axios.post(`${PYTHON_SERVICE_URL}/extract`, {}, {
+      timeout: 3600000 // 1 hour timeout for extraction
+    });
+    
+    res.json({ 
+      success: true, 
+      message: response.data.message,
+      total_videos: response.data.total_videos
+    });
+  } catch (e) {
+    console.error(`[UPDATE-DB] Error: ${e.message}`);
+    if (e.response) {
+      res.status(500).json({ error: e.response.data.error || 'Python service failed' });
+    } else {
+      res.status(500).json({ error: e.message || 'Python service failed' });
+    }
+  }
 });
 
 // STREAM VIDEO VỚI RANGE SUPPORT
@@ -672,17 +911,19 @@ app.get('/video', async (req, res) => {
     const candidate = rawPath.startsWith('/') ? rawPath : path.join(APP_ROOT, rawPath);
     const filePath = path.resolve(candidate);
 
-    // Chỉ cho phép truy cập trong thư mục dự án để tránh lộ file hệ thống
-    if (!filePath.startsWith(APP_ROOT)) return res.status(403).json({ error: 'Forbidden' });
-
-    // Chỉ cho phép các thư mục video hợp lệ
+    // Chỉ cho phép các thư mục video hợp lệ (kiểm tra DATA_DIR và APP_ROOT)
     const allowedDirs = [
-      path.join(APP_ROOT, 'video'),
-      path.join(APP_ROOT, 'visitdeo-livestream'),
-      path.join(APP_ROOT, 'uploads'),
-      TEMPLATE_DIR
+      VIDEO_OUT_DIR,
+      LIVESTREAM_DIR,
+      UPLOAD_DIR,
+      TEMPLATE_DIR,
+      DATA_DIR  // Cho phép truy cập vào toàn bộ DATA_DIR
     ];
-    const isAllowed = allowedDirs.some(dir => filePath.startsWith(dir + path.sep) || filePath === dir);
+    const isAllowed = allowedDirs.some(dir => {
+      const normalizedDir = path.resolve(dir);
+      const normalizedPath = path.resolve(filePath);
+      return normalizedPath.startsWith(normalizedDir + path.sep) || normalizedPath === normalizedDir;
+    });
     if (!isAllowed) return res.status(403).json({ error: 'Path not allowed' });
 
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Not found' });
@@ -759,9 +1000,8 @@ app.delete('/reset', async (req, res) => {
     // Xóa bảng con trước để tránh ràng buộc khóa ngoại
     await pool.query('DELETE FROM search_results');
     await pool.query('DELETE FROM search_requests');
-    // Xóa tất cả video trong thư mục visitdeo-livestream
-    const livestreamDir = path.join(APP_ROOT, 'visitdeo-livestream');
-    const deleted = await deleteVideosInDirectory(livestreamDir).catch(() => 0);
+    // Xóa tất cả video trong thư mục livestream
+    const deleted = await deleteVideosInDirectory(LIVESTREAM_DIR).catch(() => 0);
     return res.json({ success: true, deleted_videos: deleted });
   } catch (e) {
     console.error('[DB] Reset failed:', e.message);

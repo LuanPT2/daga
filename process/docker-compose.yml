@@ -1,0 +1,24 @@
+services:
+  python-processor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: python-processor
+    ports:
+      - "5051:5051"
+    environment:
+      - PORT=5051
+      - HOST=0.0.0.0
+      - DATA_DIR=/data/daga/1daga
+    volumes:
+      # Mount data directory from host
+      - /data/daga/1daga:/data/daga/1daga
+      # Mount source code for development (optional)
+      - ./api.py:/app/api.py
+      - ./config.py:/app/config.py
+      - ./search_video.py:/app/search_video.py
+      - ./extract_features.py:/app/extract_features.py
+      - ./verify_video.py:/app/verify_video.py
+      - ./segment_videos.py:/app/segment_videos.py
+    restart: unless-stopped
+

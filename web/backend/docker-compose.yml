@@ -1,0 +1,56 @@
+services:
+  # MySQL Database
+  mysql:
+    image: mysql:8.0
+    container_name: backend-mysql
+    ports:
+      - "3306:3306"
+    environment:
+      - MYSQL_ROOT_PASSWORD=abcd1234
+      - MYSQL_DATABASE=video_search
+      - MYSQL_USER=app_user
+      - MYSQL_PASSWORD=abcd1234
+    volumes:
+      - mysql_data:/var/lib/mysql
+    command: --default-authentication-plugin=mysql_native_password
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pabcd1234"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Backend Web Server - Node.js only
+  backend:
+    build:
+      context: ../..
+      dockerfile: web/backend/Dockerfile
+    container_name: backend-app
+    ports:
+      - "5050:5050"
+    environment:
+      - NODE_ENV=production
+      - PORT=5050
+      - HOST=0.0.0.0
+      # MySQL connection to Docker service
+      - MYSQL_HOST=mysql
+      - MYSQL_PORT=3306
+      - MYSQL_USER=app_user
+      - MYSQL_PASSWORD=abcd1234
+      - MYSQL_DB=video_search
+      - APP_ROOT=/app
+      - DATA_DIR=/data/daga/1daga
+      - PYTHON_SERVICE_URL=http://192.168.132.134:5051
+    volumes:
+      # Mount data directory from host
+      - /data/daga/1daga:/data/daga/1daga
+      # Mount source code for fast development
+      - ../../web/backend/server.js:/app/web/backend/server.js
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+

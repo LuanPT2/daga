@@ -3,9 +3,10 @@ Cấu hình cho hệ thống phát hiện video tương đồng
 """
 import os
 
-# Đường dẫn
-VIDEO_FOLDER = "../video"
-VECTOR_FOLDER = "../vector"
+# Đường dẫn - chỉ dùng environment variable cho Docker
+DATA_DIR = os.environ.get('DATA_DIR', '/data/daga/1daga')
+VIDEO_FOLDER = os.path.join(DATA_DIR, '2video')
+VECTOR_FOLDER = os.path.join(DATA_DIR, '3vertor')
 FEATURES_FILE = os.path.join(VECTOR_FOLDER, "video_features.faiss")
 METADATA_FILE = os.path.join(VECTOR_FOLDER, "video_metadata.pkl")
 
