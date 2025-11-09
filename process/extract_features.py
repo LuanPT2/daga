@@ -16,6 +16,29 @@ from PIL import Image
 from transformers import CLIPProcessor, CLIPModel
 from joblib import Parallel, delayed
 import config
+import platform
+
+
+def normalize_video_path_for_metadata(video_path: str) -> str:
+    """
+    Chuẩn hóa đường dẫn video trước khi lưu vào metadata.
+    Chuyển đổi đường dẫn tuyệt đối thành đường dẫn tương đối để có thể
+    hoạt động được trong cả Windows và Docker.
+    """
+    if not video_path:
+        return video_path
+    
+    # Nếu là đường dẫn tuyệt đối Windows (có dấu :), chuyển thành đường dẫn tương đối
+    if ":" in video_path and platform.system() != "Windows":
+        # Trong Docker, chuyển D:/3data/... thành /data/...
+        if video_path.startswith("D:/"):
+            relative_path = video_path[3:]  # Bỏ "D:/"
+            return "/data/" + relative_path
+        elif video_path.startswith("D:"):
+            relative_path = video_path[2:]  # Bỏ "D:"
+            return "/data/" + relative_path
+    
+    return video_path
 
 
 def _create_model():
@@ -70,7 +93,7 @@ def _extract_from_video_single(video_path):
             if norm > 0:
                 feature_vector = feature_vector / norm
         
-        metadata = {'video_name': video_name, 'video_path': video_path}
+        metadata = {'video_name': video_name, 'video_path': normalize_video_path_for_metadata(video_path)}
         return (feature_vector, metadata)
     
     except Exception as e:
@@ -170,7 +193,7 @@ class VideoFeatureExtractor:
         if features is not None:
             metadata = {
                 'video_name': video_name,
-                'video_path': video_path
+                'video_path': normalize_video_path_for_metadata(video_path)
             }
             return (features, metadata)
         

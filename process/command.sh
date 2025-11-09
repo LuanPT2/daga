@@ -23,7 +23,7 @@ python3 /Users/luanpt/Downloads/video_daga/source/segment_videos.py \
   --template "/Users/luanpt/Downloads/video_daga/video_cut/cut.mov"
 
 
-  cd /Users/luanpt/Downloads/video_daga
+cd /Users/luanpt/Downloads/video_daga
 python3 -m venv .venv
 source .venv/bin/activate
 
@@ -34,6 +34,13 @@ python -m pip install opencv-python-headless
 
 # kiểm tra
 python -c "import cv2; print(cv2.__version__)"
+
+
+python -m venv venv312
+.\venv312\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+cd process
+pip install -r requirements.txt
 
 # chạy lại tool (1 file template)
 python /Users/luanpt/Downloads/video_daga/source/tools/segment_videos.py \

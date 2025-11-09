@@ -97,8 +97,6 @@ python search_video.py ../visitdeo-livestream/video1-001-D.mov  # chạy nhiều
 
 
 
-
-
 ```bash
 cd /Users/luanpt/Downloads/video_daga
 source .venv/bin/activate
@@ -107,47 +105,106 @@ python search_video.py ../video/video1-001-D.mov
 ```
 
 
-```
-CREATE DATABASE `daga` /*!40100 DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci */ /*!80016 DEFAULT ENCRYPTION='N'*/;
--- daga.search_requests definition
-
-CREATE TABLE `search_requests` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `query_path` text NOT NULL,
-  `status` enum('pending','processing','completed','failed') DEFAULT 'pending',
-  `request_id` varchar(36) NOT NULL,
-  `error` text,
-  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `request_id` (`request_id`),
-  KEY `idx_status` (`status`),
-  KEY `idx_request_id` (`request_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
-
--- daga.search_results definition
-
-CREATE TABLE `search_results` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `request_id` bigint NOT NULL,
-  `rank_no` int NOT NULL,
-  `video_name` varchar(255) DEFAULT NULL,
-  `similarity` decimal(6,2) DEFAULT NULL,
-  `video_path` text,
-  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`),
-  KEY `idx_request_id` (`request_id`),
-  CONSTRAINT `search_results_ibfk_1` FOREIGN KEY (`request_id`) REFERENCES `search_requests` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-```
-
-
-
-
 Bạn xem lại với
 khi bấm nút start record thì có 2 xử lý
 1 là mỗi 15s lưu vào /Users/luanpt/Downloads/video_daga/visitdeo-livestream
 2 là mỗi trận thì lưu vào đây /Users/luanpt/Downloads/video_daga/video
 làm sao xác định được mỗi trận . vì mỗi trận có quảng cáo, tôi đã đưa các đoạn quảng cáo vào /Users/luanpt/Downloads/video_daga/video_cut 
 chỉ cần kiểm tra giữ 2 lần quảng cáo alf biết hết 1 trận
+
+
+
+python -m venv venv312
+.\venv312\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+cd process
+pip install -r requirements.txt
+
+
+# Python Processing Service
+
+Service xử lý video similarity search sử dụng ML models (CLIP, FAISS).
+
+## 📋 Yêu cầu
+
+- Docker >= 20.10
+- Docker Compose >= 2.0
+- RAM: Tối thiểu 4GB (khuyến nghị 8GB+)
+- GPU: Khuyến nghị (nhanh hơn 5-10x)
+
+## 🚀 Cách chạy
+
+### Development Mode
+
+```bash
+cd process
+
+# Build lần đầu
+docker-compose build
+
+# Chạy service
+docker-compose up -d
+
+# Xem logs
+docker-compose logs -f
+
+# Sửa code → chỉ cần restart
+docker-compose restart
+```
+
+### Production Mode
+
+```bash
+docker-compose up -d --build
+```
+
+## ⚙️ Cấu hình
+
+### Environment Variables
+
+- `PORT`: Port cho API (mặc định: 5051)
+- `HOST`: Host để bind (mặc định: 0.0.0.0)
+- `DATA_DIR`: Thư mục dữ liệu (mặc định: /data/daga/1daga)
+
+### Data Directory
+
+Service sử dụng `/data/daga/1daga`:
+- `2video/` - Video đầu vào
+- `3vertor/` - Vector database (FAISS)
+
+## 📡 API Endpoints
+
+- `GET /health` - Health check
+- `POST /search` - Tìm kiếm video tương đồng
+  ```json
+  {
+    "video_path": "/data/daga/1daga/5video-livestream/video.mp4"
+  }
+  ```
+- `POST /extract` - Trích xuất features từ video folder
+- `POST /verify` - Verify video similarity
+  ```json
+  {
+    "video_path": "/data/daga/1daga/5video-livestream/video.mp4"
+  }
+  ```
+
+## 🔍 Kiểm tra
+
+```bash
+# Health check
+curl http://localhost:5051/health
+
+# Test search
+curl -X POST http://localhost:5051/search \
+  -H "Content-Type: application/json" \
+  -d '{"video_path": "/data/daga/1daga/5video-livestream/video.mp4"}'
+```
+
+## 📝 Notes
+
+- Model CLIP được load khi service start (mất vài giây)
+- Vector database phải có sẵn trong `3vertor/` trước khi search
+- Build lần đầu mất ~10 phút (download packages)
+- Build lại chỉ mất vài giây (BuildKit cache)
+

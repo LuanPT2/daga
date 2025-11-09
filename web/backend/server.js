@@ -13,7 +13,6 @@ const swaggerUi = require('swagger-ui-express');
 const verifyJobs = {}; // { verify_id: { status, progress, similarity } }
 
 // ==================== CẤU HÌNH ====================
-const APP_ROOT = path.resolve(__dirname, '../../../');
 // Chỉ dùng environment variable cho Docker
 const DATA_DIR = process.env.DATA_DIR || '/data/daga/1daga';
 
@@ -275,10 +274,24 @@ async function runSearchJob(videoPath, requestId, shouldCleanup = true) {
     await pool.query('UPDATE search_requests SET status = ? WHERE request_id = ?', ['processing', requestId]);
     console.log(`[${logId}] [DB] Set status = processing`);
 
+    // Chuẩn hóa đường dẫn trước khi gửi cho Python API
+    let normalizedVideoPath = videoPath;
+    
+    // Nếu đường dẫn là Windows path (có dấu :) và đang chạy trong Docker
+    if (videoPath.includes(':/') && process.platform === 'linux') {
+      // Chuyển đổi Windows path sang Docker path
+      const windowsDataDir = 'D:/3data/1daga';
+      const dockerDataDir = '/data/daga/1daga';
+      if (videoPath.startsWith(windowsDataDir)) {
+        normalizedVideoPath = videoPath.replace(windowsDataDir, dockerDataDir).replace(/\\/g, '/');
+      }
+    }
+    
     // Gọi Python service qua HTTP
     console.log(`[${logId}] [PYTHON] Calling service: ${PYTHON_SERVICE_URL}/search`);
+    console.log(`[${logId}] [PYTHON] Video path: ${normalizedVideoPath}`);
     const response = await axios.post(`${PYTHON_SERVICE_URL}/search`, {
-      video_path: videoPath
+      video_path: normalizedVideoPath
     }, {
       timeout: 300000 // 5 minutes timeout
     });
@@ -291,14 +304,27 @@ async function runSearchJob(videoPath, requestId, shouldCleanup = true) {
     console.log(`[${logId}] [PYTHON] Received ${results.length} results`);
 
     const values = results.slice(0, 20).map((r, idx) => {
-      const rawPath = String(r.video_path || '');
-      const absPath = path.isAbsolute(rawPath) ? rawPath : path.resolve(rawPath);
+      let rawPath = String(r.video_path || '');
+      let finalPath = rawPath;
+      
+      // Xử lý đường dẫn Windows trong môi trường Docker
+      if (rawPath.includes(':/') || rawPath.includes('\\')) {
+        // Đây là đường dẫn Windows, giữ nguyên không cần resolve
+        finalPath = rawPath;
+      } else if (path.isAbsolute(rawPath)) {
+        // Đường dẫn tuyệt đối Unix
+        finalPath = rawPath;
+      } else {
+        // Đường dẫn tương đối
+        finalPath = path.resolve(rawPath);
+      }
+      
       return [
         requestId,
         Number(r.rank) || (idx + 1),
         String(r.video_name || 'Unknown'),
         parseFloat(r.similarity || 0).toFixed(2),
-        absPath
+        finalPath
       ];
     });
 
@@ -908,7 +934,7 @@ app.get('/video', async (req, res) => {
     if (!qPath) return res.status(400).json({ error: 'Missing path' });
 
     const rawPath = String(qPath);
-    const candidate = rawPath.startsWith('/') ? rawPath : path.join(APP_ROOT, rawPath);
+    const candidate =  rawPath;
     const filePath = path.resolve(candidate);
 
     // Chỉ cho phép các thư mục video hợp lệ (kiểm tra DATA_DIR và APP_ROOT)
