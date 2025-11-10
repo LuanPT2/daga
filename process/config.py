@@ -20,8 +20,11 @@ def detect_data_dir():
         return env_path
 
     # Phát hiện môi trường
-    is_docker = os.path.exists("/.dockerenv") or os.path.isdir("/data")
-    is_windows = platform.system() == "Windows"
+    # Chỉ coi là Docker nếu có /.dockerenv hoặc đang chạy trên Linux/Mac và có thư mục /data
+    # Tránh trường hợp Windows có thư mục C:\data làm hiểu nhầm là Docker
+    sys_platform = platform.system()
+    is_windows = sys_platform == "Windows"
+    is_docker = os.path.exists("/.dockerenv") or (not is_windows and os.path.isdir("/data"))
 
     if is_docker:
         return DOCKER_DATA_DIR
