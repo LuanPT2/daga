@@ -318,6 +318,9 @@ async function runSearchJob(videoPath, requestId, shouldCleanup = true) {
         // Đường dẫn tương đối
         finalPath = path.resolve(rawPath);
       }
+      // Thay thế đường dẫn tạm sang thư mục video trước khi lưu DB
+      // Yêu cầu: replace "D:\\3data\\1daga\\1temp" thành "D:\\3data\\1daga\\2video"
+      finalPath = finalPath.replace('D:\\3data\\1daga\\1temp', 'D:\\3data\\1daga\\2video');
       
       return [
         requestId,

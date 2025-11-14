@@ -35,12 +35,20 @@ curl -X POST http://localhost:5051/extract \
 # Vào container
 docker exec -it python-processor bash
 
-# Chạy extract_features.py trực tiếp
+# Chạy extract_features.py trực tiếp (mặc định create)
 cd /app
-python extract_features.py
+python extract_features.py --mode create
 
-# Hoặc chạy với các tham số tùy chỉnh
-python extract_features.py --video_folder /data/daga/1daga/2video --output /data/daga/1daga/3vertor
+# Hoặc chạy với các tham số tùy chỉnh (khuyến nghị)
+python extract_features.py \
+  --mode update \
+  --video_folder /data/daga/1daga/2video \
+  --output /data/daga/1daga/3vertor
+
+#### Tham số CLI
+- `--mode`: `create` (tạo mới index/metadata), `update` (thêm vector mới, bỏ trùng theo `video_path`)
+- `--video_folder`: thư mục chứa video đầu vào (override `config.VIDEO_FOLDER`)
+- `--output`: thư mục lưu vector và metadata (override `config.VECTOR_FOLDER`)
 ```
 
 ### Kiểm tra kết quả
@@ -56,6 +64,8 @@ docker-compose logs python-processor
 - Đảm bảo thư mục `/data/daga/1daga/2video` chứa các file video cần xử lý
 - Features sẽ được lưu vào `/data/daga/1daga/3vertor/video_features.faiss` và `/data/daga/1daga/3vertor/video_metadata.pkl`
 - Quá trình extract có thể mất vài phút tùy thuộc vào số lượng video
+- Ở chế độ `update`, script tự động bỏ qua video đã có trong metadata (chống trùng theo `video_path`)
+- Nếu dimension của vector mới khác dimension index hiện có, script sẽ chuyển sang `create` để đảm bảo nhất quán
 
 ## 🔄 Quản lý Features
 
@@ -65,10 +75,21 @@ docker-compose logs python-processor
 rm -f /data/daga/1daga/3vertor/video_features.faiss
 rm -f /data/daga/1daga/3vertor/video_metadata.pkl
 
-# Chạy extract features mới
+# Tạo mới index từ toàn bộ thư mục video (CLI)
+python extract_features.py \
+  --mode create \
+  --video_folder /data/daga/1daga/2video \
+  --output /data/daga/1daga/3vertor
+
+# Hoặc gọi API với chế độ create
 curl -X POST http://localhost:5051/extract \
   -H "Content-Type: application/json" \
-  -d '{}'
+  -d '{"mode":"create"}'
+
+
+  # Tạo mới index từ toàn bộ thư mục video (CLI)
+python extract_features.py --mode create --video_folder D:/3data/1daga/2video --output D:/3data/1daga/3vertor
+
 ```
 
 ### Cập nhật Features (Thêm video mới)
@@ -76,10 +97,16 @@ curl -X POST http://localhost:5051/extract \
 # Copy video mới vào thư mục
 cp /path/to/new_videos/* /data/daga/1daga/2video/
 
-# Chạy extract lại để cập nhật features
+# Cập nhật index bằng cách thêm vector mới (CLI)
+python extract_features.py \
+  --mode update \
+  --video_folder /data/daga/1daga/2video \
+  --output /data/daga/1daga/3vertor
+
+# Hoặc gọi API với chế độ update
 curl -X POST http://localhost:5051/extract \
   -H "Content-Type: application/json" \
-  -d '{}'
+  -d '{"mode":"update"}'
 ```
 
 ### Xóa Features
@@ -318,3 +345,7 @@ type *.log
 # Trực tiếp (Linux/Mac)
 tail -f *.log
 ```
+
+
+python extract_features.py --mode create --video_folder D:/3data/1daga/2video --output D:/3data/1daga/3vertor
+python extract_features.py --mode update --video_folder D:/3data/1daga/1temp --output D:/3data/1daga/3vertor

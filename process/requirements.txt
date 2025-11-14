@@ -14,3 +14,4 @@ gradio>=4.42.0,<5
 # audioop-lts>=0.2.1
 Flask>=3.0.0
 flask-cors>=4.0.0
+requests>=2.31.0

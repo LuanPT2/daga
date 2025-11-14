@@ -19,7 +19,7 @@ class VideoSearcher:
         print("Đang load CLIP model...")
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model = CLIPModel.from_pretrained(config.CLIP_MODEL_NAME).to(self.device)
-        self.processor = CLIPProcessor.from_pretrained(config.CLIP_MODEL_NAME)
+        self.processor = CLIPProcessor.from_pretrained(config.CLIP_MODEL_NAME, use_fast=True)
         self.model.eval()
         
         # Load FAISS index

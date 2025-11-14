@@ -16,6 +16,10 @@ import config
 from search_video import VideoSearcher
 from extract_features import VideoFeatureExtractor
 from verify_video import VideoVerifier
+import time
+import glob
+import shutil
+import threading
 
 
 app = Flask(__name__)
@@ -27,12 +31,26 @@ CORS(app)
 searcher = None
 extractor = None
 verifier = None
+index_mtime = None
+metadata_mtime = None
+_ingest_thread_started = False
+
+
+def _reload_searcher():
+    """Reload VideoSearcher and capture index/metadata mtimes."""
+    global searcher, index_mtime, metadata_mtime
+    searcher = VideoSearcher()
+    index_mtime = os.path.getmtime(config.FEATURES_FILE) if os.path.exists(config.FEATURES_FILE) else None
+    metadata_mtime = os.path.getmtime(config.METADATA_FILE) if os.path.exists(config.METADATA_FILE) else None
+    return searcher
 
 
 def get_searcher():
-    global searcher
-    if searcher is None:
-        searcher = VideoSearcher()
+    global searcher, index_mtime, metadata_mtime
+    current_index_mtime = os.path.getmtime(config.FEATURES_FILE) if os.path.exists(config.FEATURES_FILE) else None
+    current_metadata_mtime = os.path.getmtime(config.METADATA_FILE) if os.path.exists(config.METADATA_FILE) else None
+    if searcher is None or index_mtime != current_index_mtime or metadata_mtime != current_metadata_mtime:
+        return _reload_searcher()
     return searcher
 
 
@@ -85,7 +103,9 @@ def health():
         'service': 'python-processor',
         'data_dir': config.DATA_DIR,
         'vector_folder': config.VECTOR_FOLDER,
-        'env': platform.system()
+        'env': platform.system(),
+        'index_mtime': os.path.getmtime(config.FEATURES_FILE) if os.path.exists(config.FEATURES_FILE) else None,
+        'metadata_mtime': os.path.getmtime(config.METADATA_FILE) if os.path.exists(config.METADATA_FILE) else None
     })
 
 
@@ -145,26 +165,148 @@ def extract():
     try:
         from extract_features import save_features
 
+        # Cho phép body chỉ định mode và folder
+        data = request.get_json(silent=True) or {}
+        mode = data.get('mode', 'create')
+        video_folder = data.get('video_folder') or config.VIDEO_FOLDER
+
         extractor = get_extractor()
         features_list, metadata_list = extractor.process_video_folder(
-            config.VIDEO_FOLDER,
+            video_folder,
             use_parallel=True,
             n_jobs=config.N_JOBS
         )
-        save_features(features_list, metadata_list)
+        save_features(features_list, metadata_list, mode=mode)
+
+        # Reload searcher sau update
+        _reload_searcher()
 
         return jsonify({
             'success': True,
             'message': 'Extraction completed',
             'features_file': config.FEATURES_FILE,
             'metadata_file': config.METADATA_FILE,
-            'total_videos': len(features_list)
+            'mode': mode,
+            'video_folder': video_folder,
+            'total_videos': len(metadata_list)
         })
 
     except Exception as e:
         print(f'[EXTRACT ERROR] {str(e)}')
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+
+
+# ======================================================
+# 🔄 Refresh Searcher
+# ======================================================
+@app.route('/refresh-searcher', methods=['POST'])
+def refresh_searcher():
+    """Force reload of VideoSearcher (after vector updates)."""
+    try:
+        s = _reload_searcher()
+        return jsonify({
+            'success': True,
+            'message': 'Searcher reloaded',
+            'index_file': config.FEATURES_FILE,
+            'metadata_file': config.METADATA_FILE,
+            'metadata_count': len(getattr(s, 'metadata', []))
+        })
+    except Exception as e:
+        print(f'[REFRESH ERROR] {str(e)}')
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+# ======================================================
+# 📦 Batch Ingest Worker (background loop)
+# ======================================================
+VIDEO_EXTS = ("*.mov", "*.mp4", "*.avi", "*.mkv", "*.webm")
+
+
+def _ensure_dirs():
+    for d in [config.SAVE_FOLDER, config.TEMP_FOLDER, config.VIDEO_FOLDER, config.VECTOR_FOLDER]:
+        os.makedirs(d, exist_ok=True)
+
+
+def _list_videos(folder: str):
+    files = []
+    for ext in VIDEO_EXTS:
+        files.extend(glob.glob(os.path.join(folder, ext)))
+    return files
+
+
+def _move_all(src: str, dst: str):
+    os.makedirs(dst, exist_ok=True)
+    moved = []
+    for path in _list_videos(src):
+        try:
+            base = os.path.basename(path)
+            target = os.path.join(dst, base)
+            if os.path.exists(target):
+                name, ext = os.path.splitext(base)
+                i = 1
+                while True:
+                    candidate = os.path.join(dst, f"{name}_{i}{ext}")
+                    if not os.path.exists(candidate):
+                        target = candidate
+                        break
+                    i += 1
+            shutil.move(path, target)
+            moved.append(target)
+        except Exception as e:
+            print(f"[MOVE ERROR] {path} → {dst} : {e}")
+            continue
+    return moved
+
+
+def _run_ingest_cycle():
+    print("\n=== [INGEST] Cycle Start ===")
+    _ensure_dirs()
+
+    # 1) SAVE → TEMP
+    moved_to_temp = _move_all(config.SAVE_FOLDER, config.TEMP_FOLDER)
+    print(f"[INGEST] Moved to temp: {len(moved_to_temp)} files")
+
+    # 2) Update vectors from TEMP
+    extractor = get_extractor()
+    features_list, metadata_list = extractor.process_video_folder(
+        config.TEMP_FOLDER,
+        use_parallel=True,
+        n_jobs=config.N_JOBS
+    )
+    if features_list:
+        from extract_features import save_features
+        save_features(features_list, metadata_list, mode="update")
+        print(f"[INGEST] Updated vectors: +{len(features_list)}")
+        _reload_searcher()
+    else:
+        print("[INGEST] No new features to update")
+
+    # 3) TEMP → VIDEO
+    moved_to_video = _move_all(config.TEMP_FOLDER, config.VIDEO_FOLDER)
+    print(f"[INGEST] Moved to video: {len(moved_to_video)} files")
+    print("=== [INGEST] Cycle End ===\n")
+
+
+def _ingest_worker_loop():
+    while True:
+        try:
+            _run_ingest_cycle()
+        except Exception as e:
+            print(f"[INGEST] Cycle error: {e}")
+            traceback.print_exc()
+        # Nghỉ 3 phút sau mỗi vòng xử lý
+        time.sleep(180)
+
+
+def _start_ingest_worker():
+    global _ingest_thread_started
+    if _ingest_thread_started:
+        return
+    _ingest_thread_started = True
+    t = threading.Thread(target=_ingest_worker_loop, name="ingest-worker", daemon=True)
+    t.start()
 
 
 # ======================================================
@@ -208,4 +350,6 @@ if __name__ == '__main__':
     host = os.environ.get('HOST', '0.0.0.0')
     print(f"Starting Python API service on {host}:{port}")
     print(f"Using DATA_DIR: {config.DATA_DIR}")
+    # Khởi động ingest worker nền: xử lý rồi nghỉ 5 phút, lặp lại
+    _start_ingest_worker()
     app.run(host=host, port=port, debug=False)

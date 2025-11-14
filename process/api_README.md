@@ -115,3 +115,11 @@ Sau khi chạy, test `GET /health` và các lệnh `POST /search` như trên.
   - Windows: `$env:DATA_DIR = "D:/3data/1daga"`
   - Docker: `DATA_DIR=/data/daga/1daga`
 - Hiệu năng phụ thuộc vào GPU/CPU và số lượng video trong dataset.
+
+
+
+python -m venv venv312
+.\venv312\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+cd process
+pip install -r requirements.txt
